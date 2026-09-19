@@ -1,0 +1,6 @@
+{
+  "name": "financial-sims",
+  "private": true,
+  "type": "module",
+  "description": "Static client-side financial simulator (no backend). Deployable as-is to GitHub Pages."
+}

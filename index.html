@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Financial Sims — Static</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>Financial Simulator (static)</h1>
+      <div class="controls">
+        <label>Current Age <input id="currentAge" type="number" value="35" min="0" max="120"/></label>
+        <label>Target Retirement Age <input id="retireAge" type="number" value="65" min="0" max="120"/></label>
+        <label>City <select id="citySelect"></select></label>
+        <label>Particles <input id="numParticles" type="number" value="300" min="20" max="2000" step="20"/></label>
+        <label class="inline"><input id="useParticleFilter" type="checkbox" checked/> Bankruptcy-aware resampling</label>
+        <button id="runSim">Run Simulation</button>
+      </div>
+      <div id="summaryStats" class="summary"></div>
+    </header>
+
+    <main>
+      <section class="left">
+        <details open>
+          <summary><h2>Accounts</h2></summary>
+          <div id="accounts"></div>
+          <button id="addAccount">+ Add Account</button>
+        </details>
+
+        <details open>
+          <summary><h2>Income &amp; Expenses</h2></summary>
+          <div id="blocks"></div>
+          <div class="block-actions">
+            <button id="addIncome">+ Add Income</button>
+            <button id="addExpense">+ Add Expense</button>
+          </div>
+        </details>
+
+        <details>
+          <summary><h2>Global Returns Schedule</h2></summary>
+          <p class="small">Segments override the default for their date range (e.g. a hot year followed by a crash). Any account can instead use its own custom schedule.</p>
+          <div id="returnsSegments"></div>
+          <button id="addReturnSegment">+ Add Segment</button>
+          <div class="row">
+            <label>Default annual % <input id="defaultAnnual" type="number" step="0.1" value="6"/></label>
+            <label>Default σ % <input id="defaultSigma" type="number" step="0.1" value="9"/></label>
+          </div>
+        </details>
+
+        <details>
+          <summary><h2>House Affordability</h2></summary>
+          <div class="row"><label>Gross monthly income <input id="affIncome" type="number" value="10000"/></label></div>
+          <div class="row"><label>Existing monthly debt <input id="affDebt" type="number" value="0"/></label></div>
+          <div class="row"><label>Down payment $ <input id="affDown" type="number" value="60000"/></label></div>
+          <div class="row"><label>Mortgage rate % <input id="affRate" type="number" step="0.1" value="6.5"/></label></div>
+          <div class="row"><label>Term (years) <input id="affTerm" type="number" value="30"/></label></div>
+          <div class="row"><label>Property tax % / yr <input id="affTax" type="number" step="0.1" value="1.1"/></label></div>
+          <div class="row"><label>Insurance $ / yr <input id="affIns" type="number" value="1800"/></label></div>
+          <div class="row"><label>HOA $ / month <input id="affHOA" type="number" value="0"/></label></div>
+          <button id="computeAfford">Compute Max Home Price</button>
+          <div id="affordResult" class="result"></div>
+        </details>
+      </section>
+
+      <section class="right">
+        <h3>Net Worth Percentile Bands</h3>
+        <canvas id="balanceChart" height="320"></canvas>
+        <h3>Balances by Account Type (mean)</h3>
+        <canvas id="compositionChart" height="260"></canvas>
+      </section>
+    </main>
+
+    <footer>
+      <small>Static demo — modular code in <code>src/</code>. Tax figures are simplified planning approximations, not tax advice.</small>
+    </footer>
+
+    <script type="module" src="src/app.js"></script>
+  </body>
+</html>
+

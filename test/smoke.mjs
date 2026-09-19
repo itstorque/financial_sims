@@ -6,6 +6,7 @@ import { defaultAccounts } from '../src/accounts.js';
 import { createBlock } from '../src/blocks.js';
 import { defaultReturnsSchedule } from '../src/returnsSchedule.js';
 import { maxHomePrice } from '../src/affordability.js';
+import { serializeState, reviveState } from '../src/persistence.js';
 
 let failures = 0;
 function assert(cond, msg) {
@@ -56,6 +57,16 @@ assert(out.solvencyRate >= 0 && out.solvencyRate <= 1, `solvencyRate in [0,1] ($
 assert(out.fireStats && out.fireStats.fireNumber === 45000 * 25, `fireNumber = 25x annual living cost (${out.fireStats.fireNumber})`);
 assert(out.fireStats.successRate >= 0 && out.fireStats.successRate <= 1, 'fire success rate in [0,1]');
 assert(out.byAccountTypeTimeline.length === 36, 'composition timeline has one entry per month');
+
+// --- Persistence round-trip (serialize -> revive should preserve shape/values) ---
+const stateForSave = { accounts, blocks, globalReturnsSchedule: defaultReturnsSchedule() };
+const serialized = serializeState(stateForSave);
+const revived = reviveState(JSON.parse(JSON.stringify(serialized))); // force through JSON like localStorage would
+assert(Object.keys(revived.accounts).length === Object.keys(accounts).length, 'revived account count matches');
+assert(revived.accounts.checking.balance === accounts.checking.balance, 'revived account balance matches');
+assert(revived.blocks.length === blocks.length, 'revived block count matches');
+assert(revived.blocks[0].targetAccountId === blocks[0].targetAccountId, 'revived block targetAccountId preserved');
+assert(revived.globalReturnsSchedule.getFor(new Date('2027-06-01')).annual === defaultReturnsSchedule().getFor(new Date('2027-06-01')).annual, 'revived returns schedule getFor matches original');
 
 // --- Debt appreciation smoke test ---
 const debtAccounts = defaultAccounts();

@@ -24,6 +24,21 @@
     <main>
       <section class="left">
         <details open>
+          <summary><h2>Scenarios</h2></summary>
+          <p class="small">Your working session (accounts, income/expenses, returns schedule, and the top settings) is auto-saved to this browser. Use this to save/load named copies of a full plan.</p>
+          <div class="row">
+            <label>Scenario name <input id="scenarioName" type="text" placeholder="e.g. Base case"/></label>
+          </div>
+          <div class="row">
+            <button id="saveScenario">Save</button>
+            <select id="scenarioSelect"></select>
+            <button id="loadScenario">Load</button>
+            <button id="deleteScenario" class="remove">Delete</button>
+          </div>
+          <div id="scenarioStatus" class="small"></div>
+        </details>
+
+        <details open>
           <summary><h2>Accounts</h2></summary>
           <div id="accounts"></div>
           <button id="addAccount">+ Add Account</button>

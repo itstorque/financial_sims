@@ -9,6 +9,7 @@ import { createBlock } from './blocks.js';
 import { defaultReturnsSchedule } from './returnsSchedule.js';
 import { cities } from './taxes.js';
 import { maxHomePrice } from './affordability.js';
+import { saveAutosave, loadAutosave, listScenarios, saveScenario, loadScenario, deleteScenario } from './persistence.js';
 
 function todayMonth() {
   const d = new Date();
@@ -17,25 +18,45 @@ function todayMonth() {
 
 function pct(v) { return ((v || 0) * 100).toFixed(1); }
 
+// The top-bar "settings" (as opposed to the full accounts/blocks/returns state).
+function gatherSettings() {
+  return {
+    currentAge: document.getElementById('currentAge').value,
+    retireAge: document.getElementById('retireAge').value,
+    city: document.getElementById('citySelect').value,
+    numParticles: document.getElementById('numParticles').value,
+    useParticleFilter: document.getElementById('useParticleFilter').checked,
+  };
+}
+
+function applySettings(settings) {
+  if (!settings) return;
+  if (settings.currentAge != null) document.getElementById('currentAge').value = settings.currentAge;
+  if (settings.retireAge != null) document.getElementById('retireAge').value = settings.retireAge;
+  if (settings.city != null) document.getElementById('citySelect').value = settings.city;
+  if (settings.numParticles != null) document.getElementById('numParticles').value = settings.numParticles;
+  if (settings.useParticleFilter != null) document.getElementById('useParticleFilter').checked = settings.useParticleFilter;
+}
+
+function seedDefaultBlocksIfEmpty(state) {
+  if (state.blocks.length > 0) return;
+  const checking = Object.values(state.accounts).find(a => a.type === 'checking');
+  const retirement = Object.values(state.accounts).find(a => a.type === 'retirement');
+  state.blocks.push(createBlock({ category: 'income', kind: 'continuous', description: 'Salary', amount: 95000, startMonth: todayMonth(), preTax: true, targetAccountId: checking?.id }));
+  state.blocks.push(createBlock({ category: 'income', kind: 'continuous', description: '401k contribution', amount: 15000, startMonth: todayMonth(), preTax: true, targetAccountId: retirement?.id }));
+  state.blocks.push(createBlock({ category: 'expense', kind: 'continuous', description: 'Living costs', amount: 48000, startMonth: todayMonth(), sourceAccountId: checking?.id, sigma: 0.05 }));
+}
+
 export function initUI(state) {
-  state.accounts = state.accounts || defaultAccounts();
-  state.blocks = state.blocks || [];
-  state.globalReturnsSchedule = state.globalReturnsSchedule || defaultReturnsSchedule();
-
-  if (state.blocks.length === 0) {
-    const checking = Object.values(state.accounts).find(a => a.type === 'checking');
-    const retirement = Object.values(state.accounts).find(a => a.type === 'retirement');
-    state.blocks.push(createBlock({ category: 'income', kind: 'continuous', description: 'Salary', amount: 95000, startMonth: todayMonth(), preTax: true, targetAccountId: checking?.id }));
-    state.blocks.push(createBlock({ category: 'income', kind: 'continuous', description: '401k contribution', amount: 15000, startMonth: todayMonth(), preTax: true, targetAccountId: retirement?.id }));
-    state.blocks.push(createBlock({ category: 'expense', kind: 'continuous', description: 'Living costs', amount: 48000, startMonth: todayMonth(), sourceAccountId: checking?.id, sigma: 0.05 }));
-  }
-
   const accountsDiv = document.getElementById('accounts');
   const blocksDiv = document.getElementById('blocks');
   const segmentsDiv = document.getElementById('returnsSegments');
   const citySelect = document.getElementById('citySelect');
   const defaultAnnualInput = document.getElementById('defaultAnnual');
   const defaultSigmaInput = document.getElementById('defaultSigma');
+  const scenarioNameInput = document.getElementById('scenarioName');
+  const scenarioSelect = document.getElementById('scenarioSelect');
+  const scenarioStatus = document.getElementById('scenarioStatus');
 
   for (const c of cities()) {
     const opt = document.createElement('option');
@@ -43,6 +64,20 @@ export function initUI(state) {
     citySelect.appendChild(opt);
   }
   citySelect.value = 'Default';
+
+  // Restore the last working session (if any) before falling back to defaults.
+  const auto = loadAutosave();
+  if (auto) {
+    state.accounts = auto.state.accounts;
+    state.blocks = auto.state.blocks;
+    state.globalReturnsSchedule = auto.state.globalReturnsSchedule;
+    applySettings(auto.settings);
+  } else {
+    state.accounts = state.accounts || defaultAccounts();
+    state.blocks = state.blocks || [];
+    state.globalReturnsSchedule = state.globalReturnsSchedule || defaultReturnsSchedule();
+  }
+  seedDefaultBlocksIfEmpty(state);
 
   defaultAnnualInput.value = pct(state.globalReturnsSchedule.defaultAnnual);
   defaultSigmaInput.value = pct(state.globalReturnsSchedule.defaultSigma);
@@ -220,9 +255,65 @@ export function initUI(state) {
       <div>Total monthly carrying cost (PITI+HOA): $${Math.round(res.monthlyCarrying).toLocaleString()}</div>`;
   });
 
+  function refreshScenarioOptions(selectName) {
+    scenarioSelect.innerHTML = '<option value="">— saved scenarios —</option>' +
+      listScenarios().map(name => `<option value="${name}" ${name === selectName ? 'selected' : ''}>${name}</option>`).join('');
+  }
+
+  function loadStateAndSettings(data) {
+    state.accounts = data.state.accounts;
+    state.blocks = data.state.blocks;
+    state.globalReturnsSchedule = data.state.globalReturnsSchedule;
+    applySettings(data.settings);
+    defaultAnnualInput.value = pct(state.globalReturnsSchedule.defaultAnnual);
+    defaultSigmaInput.value = pct(state.globalReturnsSchedule.defaultSigma);
+    renderAccounts();
+    renderBlocks();
+    renderGlobalSegments();
+  }
+
+  document.getElementById('saveScenario').addEventListener('click', () => {
+    const name = scenarioNameInput.value.trim();
+    if (!name) { scenarioStatus.textContent = 'Enter a name first.'; return; }
+    saveScenario(name, gatherSettings(), state);
+    refreshScenarioOptions(name);
+    scenarioStatus.textContent = `Saved "${name}".`;
+  });
+
+  document.getElementById('loadScenario').addEventListener('click', () => {
+    const name = scenarioSelect.value;
+    if (!name) { scenarioStatus.textContent = 'Pick a scenario to load.'; return; }
+    const data = loadScenario(name);
+    if (!data) { scenarioStatus.textContent = `Could not find "${name}".`; return; }
+    loadStateAndSettings(data);
+    scenarioNameInput.value = name;
+    scenarioStatus.textContent = `Loaded "${name}".`;
+  });
+
+  document.getElementById('deleteScenario').addEventListener('click', () => {
+    const name = scenarioSelect.value;
+    if (!name) { scenarioStatus.textContent = 'Pick a scenario to delete.'; return; }
+    deleteScenario(name);
+    refreshScenarioOptions();
+    scenarioStatus.textContent = `Deleted "${name}".`;
+  });
+
+  refreshScenarioOptions();
+
   renderAccounts();
   renderBlocks();
   renderGlobalSegments();
+
+  // Continuously autosave the working session (debounced) so a page reload
+  // doesn't lose in-progress edits, independent of the explicit named scenarios.
+  let autosaveTimer = null;
+  function scheduleAutosave() {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = setTimeout(() => saveAutosave(gatherSettings(), state), 400);
+  }
+  document.addEventListener('input', scheduleAutosave);
+  document.addEventListener('change', scheduleAutosave);
+  document.addEventListener('click', scheduleAutosave); // covers add/remove buttons (no input/change event)
 
   return { getCity: () => citySelect.value };
 }

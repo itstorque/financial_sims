@@ -31,6 +31,7 @@ server avoids any module-loading quirks in some browsers.)
 - **Monte Carlo with a particle filter**: each of N particles independently samples noise for account returns (from the returns schedule's σ) and for block amounts (their own σ). Optionally, a lightweight particle filter (weight + systematic resampling when effective sample size drops) down-weights bankrupt trajectories so the ensemble stays representative of solvent futures — this is a modeling choice you can toggle off for plain, unweighted Monte Carlo.
 - **FIRE math**: the "FIRE number" (25× nominal annual living expenses at your target retirement date) is compared against the simulated portfolio distribution to report a probability of reaching FIRE by your retirement age.
 - **House affordability**: a standalone 28/36-DTI mortgage calculator (binary-searches the max home price whose PITI+HOA fits your budget).
+- **Persistence (localStorage, no backend)**: your working session (top settings + accounts/blocks/returns schedule) auto-saves to the browser continuously, so a reload picks up where you left off. You can also explicitly **Save** the current plan under a name, then **Load**/**Delete** it later from the "Scenarios" panel — handy for comparing named plans like "Base case" vs. "Aggressive FIRE".
 
 ## Project layout
 
@@ -43,6 +44,7 @@ server avoids any module-loading quirks in some browsers.)
   - `taxes.js` — federal/state/city progressive brackets + FICA
   - `particleFilter.js` — generic weighted resampling (systematic resampling, effective sample size)
   - `affordability.js` — mortgage/DTI max-home-price calculator
+  - `persistence.js` — serialize/revive state to plain JSON + localStorage CRUD for autosave and named scenarios
   - `ui.js` — renders and wires all editable forms (mutates the shared `state` in place)
   - `plot.js` — Chart.js wrappers (percentile bands, stacked account composition)
   - `app.js` — entry point: reads controls, runs `Simulator`, renders charts + summary stats

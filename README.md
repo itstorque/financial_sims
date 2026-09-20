@@ -24,7 +24,7 @@ server avoids any module-loading quirks in some browsers.)
 
 ## What it models
 
-- **Accounts**: Checking, HYSA, Taxable brokerage, Retirement (401k/IRA), and Debt (loans/credit cards). Each can have its own custom returns schedule (e.g. a credit card's APR) or use the shared default.
+- **Accounts**: Checking, HYSA, Taxable brokerage, Retirement (401k/IRA), Roth IRA, and Debt (loans/credit cards). Each can have its own custom returns schedule (e.g. a credit card's APR) or use the shared default.
 - **Income/Expense blocks**: one-time or continuous (recurring monthly), with an optional Gaussian error bar (σ%), a date range, and — for income — a pre-tax/post-tax checkbox. Continuous blocks can also opt into a **custom amount schedule**: a piecewise timeline of annual amounts (e.g. "$120k/yr for 5 years, then $60k/yr, then $0"), edited via a visual segment timeline in the UI.
 - **Financed purchases (loan blocks)**: a dedicated block type for a down payment + amortizing mortgage (or any loan), e.g. buying a house. Given a purchase price, down-payment %, annual rate, and term, it automatically originates a linked `debt` account for the loan principal at the purchase month and applies the standard fixed monthly P&I payment thereafter — reusing the normal debt-interest-accrual machinery for correct amortization.
 - **Progressive taxes**: real marginal-bracket math for federal income tax (2024 single-filer brackets + standard deduction), state brackets/flat rates and local tax by city (dropdown), and FICA (Social Security up to the wage base + Medicare + additional Medicare surtax). Traditional-retirement contributions (income blocks targeting a `retirement` account with "pre-tax" checked) are excluded from taxable income for the year (tax-deferred) but still subject to FICA. Effective tax rate is computed **per calendar year** from all pre-tax income active that year, then applied to each month's credited amount. This is a planning approximation, not tax advice (no itemized deductions/credits/AMT/etc).
@@ -34,6 +34,7 @@ server avoids any module-loading quirks in some browsers.)
 - **House affordability**: a standalone 28/36-DTI mortgage calculator (binary-searches the max home price whose PITI+HOA fits your budget).
 - **Persistence and sharing**: your working session (top settings + accounts/blocks/returns schedule + notes) auto-saves to the browser continuously. You can explicitly **Save**, **Load**, or **Delete** named plans in the "Scenarios" panel — each with a free-form **notes** field for assumptions/context — and **Export JSON** creates a portable snapshot of the current plan for sharing or archiving.
 - **Seeded base scenario**: on first load (or whenever the named scenario is missing), a concrete example plan — "Base Case — SF Household" — is created: a dual-income household (two salaries + stock comp), a $1.2M SF house purchase via a loan block, and two child cost-of-living curves. It's always reachable from the Scenarios dropdown even after you've customized your working session; see `src/baseScenario.js` for the exact assumptions.
+- **Keep your real numbers out of git (`me.json`)**: if a `me.json` file exists next to `index.html`, it's loaded instead of the generic example on first run. `me.json` is listed in `.gitignore` so it's never committed. Create your own by filling out the app with your real data, clicking **Export JSON**, and saving the download as `me.json` at the project root — see `me.example.json` for the expected shape and `src/meScenario.js` for the loader.
 
 ## Project layout
 
@@ -48,6 +49,7 @@ server avoids any module-loading quirks in some browsers.)
   - `affordability.js` — mortgage/DTI max-home-price calculator (also used by loan blocks for the amortized payment formula)
   - `childCostModel.js` — an illustrative SF-calibrated cost-of-living-by-age curve for a child, as an `AmountSchedule` factory
   - `baseScenario.js` — builds the seeded "Base Case — SF Household" example plan (incomes, house loan, kids)
+  - `meScenario.js` — fetches and revives an optional, gitignored `me.json` (your real data) in preference to the base scenario
   - `persistence.js` — serialize/revive state (incl. loan blocks) to plain JSON + localStorage CRUD for autosave and named scenarios (with notes)
   - `ui.js` — renders and wires all editable forms (mutates the shared `state` in place)
   - `plot.js` — Chart.js wrappers (percentile bands, stacked account composition)

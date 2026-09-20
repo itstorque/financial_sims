@@ -3,7 +3,7 @@
 import { computeAnnualTax, FEDERAL_BRACKETS_SINGLE } from '../src/taxes.js';
 import { Simulator } from '../src/sim.js';
 import { Account, defaultAccounts, nextAccountId } from '../src/accounts.js';
-import { createBlock, createLoanBlock, AmountSchedule, blockActiveInMonth, nominalMonthlyAmount, loanDownPaymentAmount, loanPrincipal, loanMonthlyPayment } from '../src/blocks.js';
+import { createBlock, createLoanBlock, AmountSchedule, buildScheduleClips, spliceScheduleClip, blockActiveInMonth, nominalMonthlyAmount, loanDownPaymentAmount, loanPrincipal, loanMonthlyPayment } from '../src/blocks.js';
 import { ReturnsSchedule, defaultReturnsSchedule } from '../src/returnsSchedule.js';
 import { maxHomePrice, monthlyPI } from '../src/affordability.js';
 import { createScenarioExport, serializeState, reviveState } from '../src/persistence.js';
@@ -47,6 +47,14 @@ assert(nominalMonthlyAmount(scheduleBlock, new Date(2038, 0, 1)) === 0, 'schedul
 assert(nominalMonthlyAmount(scheduleBlock, new Date(2020, 0, 1)) === 0, 'schedule: months before any segment contribute $0');
 assert(blockActiveInMonth(scheduleBlock, new Date(2038, 0, 1)) === true, 'schedule-driven continuous blocks are always "active" (schedule itself zeroes out)');
 
+const clips = buildScheduleClips(scheduleBlock.amountSchedule.entries, '2026-01', '2040-12');
+assert(clips[0].from === '2026-01' && clips.at(-1).to === '2040-12', 'clip timeline covers the complete simulation window');
+assert(clips[0].to === '2030-12' && clips[1].from === '2031-01', 'normalized clips retain adjacent schedule boundaries');
+const firstClipAmount = clips[0].annualAmount;
+assert(spliceScheduleClip(clips, 0, '2028-01') === true, 'splice accepts a month inside a clip');
+assert(clips[0].to === '2027-12' && clips[1].from === '2028-01' && clips[1].annualAmount === firstClipAmount, 'splice creates contiguous clips and preserves settings');
+assert(spliceScheduleClip(clips, 0, clips[0].from) === false, 'splice rejects a cut at the clip start');
+
 // --- Simulation smoke test ---
 const accounts = defaultAccounts();
 const blocks = [
@@ -75,6 +83,8 @@ assert(out.solvencyRate >= 0 && out.solvencyRate <= 1, `solvencyRate in [0,1] ($
 assert(out.fireStats && out.fireStats.fireNumber === 45000 * 25, `fireNumber = 25x annual living cost (${out.fireStats.fireNumber})`);
 assert(out.fireStats.successRate >= 0 && out.fireStats.successRate <= 1, 'fire success rate in [0,1]');
 assert(out.byAccountTypeTimeline.length === 36, 'composition timeline has one entry per month');
+assert(out.byAccountTimeline.length === 36, 'account-level composition timeline has one entry per month');
+assert(Object.keys(out.byAccountTimeline[0]).length === Object.keys(accounts).length, 'account-level composition includes every account');
 
 // --- Persistence round-trip (serialize -> revive should preserve shape/values) ---
 const stateForSave = { accounts, blocks, globalReturnsSchedule: defaultReturnsSchedule() };
@@ -157,12 +167,58 @@ assert(kidSchedule.getAnnualAmountFor(new Date(2050, 8, 1)) === 0, 'child cost s
 // --- Base scenario builds without throwing and has expected shape ---
 const base = buildBaseScenario();
 assert(base.name === BASE_SCENARIO_NAME, 'base scenario has expected name');
-assert(Object.keys(base.state.accounts).length === 5, 'base scenario has 5 accounts (checking, hysa, taxable, retirement, home debt)');
+assert(Object.keys(base.state.accounts).length === 6, 'base scenario has 6 accounts (checking, hysa, taxable, retirement, roth, home debt)');
+assert(base.state.accounts.roth.balance === 500000, 'base scenario Roth IRA starts at $500k');
+assert(base.state.accounts.retirement.balance === 300000, 'base scenario retirement (401k/IRA) starts at $300k');
+assert(base.state.accounts.hysa.balance === 200000, 'base scenario savings (HYSA) starts at $200k');
+assert(base.state.accounts.checking.balance === 50000, 'base scenario checking starts at $50k');
 assert(base.state.blocks.length === 7, 'base scenario has 7 blocks (3 income, living costs, loan, 2 kids)');
 assert(base.state.blocks.some(b => b.kind === 'loan' && b.purchasePrice === 1200000), 'base scenario includes the $1.2M SF house loan block');
 const baseSim = new Simulator({ startDate: new Date(), months: 24, accounts: base.state.accounts, blocks: base.state.blocks, globalReturnsSchedule: base.state.globalReturnsSchedule, city: base.settings.city, numParticles: 20, useParticleFilter: true });
 const baseOut = baseSim.run();
 assert(baseOut.timeline.length === 24, 'base scenario simulates without throwing');
+
+// --- me.json loading (loadMeScenario) ---
+{
+  const { loadMeScenario } = await import('../src/meScenario.js');
+
+  // 1) Missing file (404) should resolve to null, not throw.
+  const http = await import('node:http');
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const __dirname = path.dirname(new URL(import.meta.url).pathname);
+  const repoRoot = path.resolve(__dirname, '..');
+
+  const server = http.createServer((req, res) => {
+    if (req.url === '/me.json') {
+      res.writeHead(404); res.end('not found');
+    } else if (req.url === '/me.example.json') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(fs.readFileSync(path.join(repoRoot, 'me.example.json')));
+    } else if (req.url === '/bad.json') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{not valid json');
+    } else {
+      res.writeHead(404); res.end();
+    }
+  });
+  await new Promise(resolve => server.listen(0, resolve));
+  const port = server.address().port;
+
+  const missing = await loadMeScenario(`http://localhost:${port}/me.json`);
+  assert(missing === null, 'loadMeScenario resolves to null on 404 (no me.json provided)');
+
+  const malformed = await loadMeScenario(`http://localhost:${port}/bad.json`);
+  assert(malformed === null, 'loadMeScenario resolves to null on invalid JSON instead of throwing');
+
+  const loaded = await loadMeScenario(`http://localhost:${port}/me.example.json`);
+  assert(loaded !== null, 'loadMeScenario successfully loads a valid scenario file');
+  assert(Object.keys(loaded.state.accounts).length === 6, 'loaded me-scenario has the expected account count');
+  assert(loaded.state.accounts.roth.balance === 500000, 'loaded me-scenario preserves Roth IRA balance');
+  assert(typeof loaded.notes === 'string' && loaded.notes.length > 0, 'loaded me-scenario preserves notes');
+
+  await new Promise(resolve => server.close(resolve));
+}
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} smoke test(s) FAILED.`);
 process.exit(failures === 0 ? 0 : 1);

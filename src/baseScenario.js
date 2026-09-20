@@ -9,7 +9,8 @@
 // a taxable brokerage). Plans to buy a $1.2M SF house in Jan 2028 (20% down,
 // ~6.75% 30-yr fixed — a rough "typical" SF rate assumption), and to have two
 // kids (in 6 and 8 years from today), each with a variable SF cost-of-living
-// curve (see childCostModel.js).
+// curve (see childCostModel.js). Starting balances: $500k Roth IRA, $300k
+// traditional retirement (401k/IRA), $200k savings (HYSA), $50k checking.
 
 import { Account, nextAccountId } from './accounts.js';
 import { ReturnsSchedule, defaultReturnsSchedule } from './returnsSchedule.js';
@@ -18,6 +19,14 @@ import { childCostAmountSchedule } from './childCostModel.js';
 
 export const BASE_SCENARIO_NAME = 'Base Case — SF Household';
 
+// Bump this whenever buildBaseScenario()'s figures/structure change. ui.js
+// compares this against a value stashed in localStorage and re-seeds both the
+// named scenario and (if untouched) the working session when it goes stale —
+// otherwise a browser that already saved an older "Base Case" would keep
+// showing outdated numbers forever (named scenarios are normally treated as
+// user data and never silently overwritten).
+export const BASE_SCENARIO_VERSION = 2;
+
 function monthsFromNow(years) {
   const d = new Date();
   d.setMonth(d.getMonth() + Math.round(years * 12));
@@ -25,10 +34,11 @@ function monthsFromNow(years) {
 }
 
 export function buildBaseScenario() {
-  const checking = new Account({ id: 'checking', name: 'Checking', type: 'checking', balance: 25000 });
-  const hysa = new Account({ id: 'hysa', name: 'House Fund (HYSA)', type: 'hysa', balance: 260000 });
-  const taxable = new Account({ id: 'taxable', name: 'Taxable Brokerage', type: 'taxable', balance: 40000 });
-  const retirement = new Account({ id: 'retirement', name: '401k / IRA (combined)', type: 'retirement', balance: 60000 });
+  const checking = new Account({ id: 'checking', name: 'Checking', type: 'checking', balance: 50000 });
+  const hysa = new Account({ id: 'hysa', name: 'Savings (HYSA)', type: 'hysa', balance: 200000 });
+  const taxable = new Account({ id: 'taxable', name: 'Taxable Brokerage', type: 'taxable', balance: 0 });
+  const retirement = new Account({ id: 'retirement', name: '401k / IRA (combined)', type: 'retirement', balance: 300000 });
+  const roth = new Account({ id: 'roth', name: 'Roth IRA', type: 'roth', balance: 500000 });
 
   const homeLoanDebtId = nextAccountId();
   const homeLoanDebt = new Account({
@@ -41,6 +51,7 @@ export function buildBaseScenario() {
     [hysa.id]: hysa,
     [taxable.id]: taxable,
     [retirement.id]: retirement,
+    [roth.id]: roth,
     [homeLoanDebt.id]: homeLoanDebt,
   };
 
@@ -95,9 +106,9 @@ export function buildBaseScenario() {
     '- Both partners are 25 today. Retirement age set to 55 as a placeholder FIRE target — change as desired.',
     '- Partner A: $160k/yr salary (pre-tax, cash). Partner B: $240k/yr salary (pre-tax, cash). Plus $60k/yr RSU/stock comp (pre-tax, ~15% amount volatility, vests into the taxable brokerage).',
     `- Living costs (excl. housing): $70k/yr, 5% noise. Adjust to match your real budget.`,
-    `- House: $1.2M in San Francisco, purchase month ${purchaseMonth}, 20% down ($240k) from the House Fund (HYSA), 30-yr fixed at 6.75% (a rough "typical SF rate" placeholder — check current rates).`,
+    `- House: $1.2M in San Francisco, purchase month ${purchaseMonth}, 20% down ($240k) from Savings (HYSA), 30-yr fixed at 6.75% (a rough "typical SF rate" placeholder — check current rates). Note: the down payment exceeds the $200k starting Savings balance, so by the purchase date it relies on savings built up from income between now and then (or edit the plan if you want a smaller/larger cushion).`,
       `- Kid 1: born ~${kid1BirthMonth} (6 years from now). Kid 2: born ~${kid2BirthMonth} (8 years from now). Each modeled with an SF-calibrated cost-of-living curve by age (infant/toddler daycare years are the most expensive) — see childCostModel.js. These are illustrative, not sourced from real SF childcare pricing data.`,
-    '- Starting balances are placeholders: Checking $25k, House Fund (HYSA) $260k, Taxable $40k, Retirement (combined) $60k.',
+    '- Starting balances are placeholders: Checking $50k, Savings (HYSA) $200k, Taxable $0, Retirement (401k/IRA, combined) $300k, Roth IRA $500k.',
     '- Market returns use the global default schedule (edit under "Global Returns Schedule").',
   ].join('\n');
 

@@ -10,7 +10,8 @@ import { ReturnsSchedule } from './returnsSchedule.js';
 import { cities } from './taxes.js';
 import { maxHomePrice } from './affordability.js';
 import { createScenarioExport, saveAutosave, loadAutosave, listScenarios, saveScenario, loadScenario, deleteScenario } from './persistence.js';
-import { buildBaseScenario, BASE_SCENARIO_NAME } from './baseScenario.js';
+import { buildBaseScenario } from './baseScenario.js';
+import { loadMeScenario } from './meScenario.js';
 
 function todayMonth() {
   const d = new Date();
@@ -78,7 +79,7 @@ function seedDefaultBlocksIfEmpty(state) {
   state.blocks.push(createBlock({ category: 'expense', kind: 'continuous', description: 'Living costs', amount: 48000, startMonth: todayMonth(), sourceAccountId: checking?.id, sigma: 0.05 }));
 }
 
-export function initUI(state) {
+export async function initUI(state) {
   const accountsDiv = document.getElementById('accounts');
   const blocksDiv = document.getElementById('blocks');
   const segmentsDiv = document.getElementById('returnsSegments');
@@ -102,10 +103,14 @@ export function initUI(state) {
   }
   citySelect.value = 'Default';
 
-  // Make the "Base Case — SF Household" example always available as a named
-  // scenario (without clobbering it if the user has since edited it).
-  if (!listScenarios().includes(BASE_SCENARIO_NAME)) {
-    const base = buildBaseScenario();
+  // Prefer a personal `me.json` (gitignored, fetched from the filesystem) if
+  // one is present; otherwise fall back to the generic example scenario.
+  const meScenario = await loadMeScenario();
+  const base = meScenario || buildBaseScenario();
+
+  // Make the base/personal scenario always available as a named scenario
+  // (without clobbering it if the user has since edited that saved copy).
+  if (!listScenarios().includes(base.name)) {
     saveScenario(base.name, base.settings, base.state, base.notes);
   }
 
@@ -118,7 +123,6 @@ export function initUI(state) {
     applySettings(auto.settings);
     scenarioNotesInput.value = auto.notes || '';
   } else {
-    const base = buildBaseScenario();
     state.accounts = base.state.accounts;
     state.blocks = base.state.blocks;
     state.globalReturnsSchedule = base.state.globalReturnsSchedule;
@@ -230,6 +234,7 @@ export function initUI(state) {
 
   function renderClipStudio(block) {
     const clips = block.amountSchedule.entries;
+    const isIncome = block.category === 'income';
     editorState.clipIndex = Math.min(editorState.clipIndex, Math.max(0, clips.length - 1));
     const selected = clips[editorState.clipIndex];
     const totalMonths = Math.max(1, keyToIdx(clips.at(-1).to) - keyToIdx(clips[0].from) + 1);
@@ -250,6 +255,16 @@ export function initUI(state) {
         <div class="timeline-toolbar"><div><strong>Schedule clips</strong><p>Choose a clip to edit it, or splice it into two periods.</p></div><span>${clips[0]?.from} → ${clips.at(-1)?.to}</span></div>
         <div class="clip-track">${timeline}</div>
         <div class="timeline-ruler"><span>${clips[0]?.from}</span><span>simulation timeline</span><span>${clips.at(-1)?.to}</span></div>
+      </section>
+      <section class="editor-section clip-flow-settings">
+        <div class="section-title"><strong>Cash-flow settings</strong><span>These settings apply to every clip on this timeline</span></div>
+        <div class="editor-form-grid">
+          <label>Cash-flow name <input id="clipFlowName" value="${escapeHtml(block.description)}"/></label>
+          <label>Uncertainty σ % <input id="clipFlowSigma" type="number" step="0.1" value="${pct(block.sigma)}"/></label>
+          ${isIncome
+            ? `<label>Target account <select id="clipFlowAccount">${accountOptions(block.targetAccountId, account => account.type !== 'debt')}</select></label><label class="editor-check"><input id="clipFlowPretax" type="checkbox" ${block.preTax ? 'checked' : ''}/> Pre-tax income</label>`
+            : `<label>Paid from <select id="clipFlowAccount">${accountOptions(block.sourceAccountId, account => account.type !== 'debt')}</select></label><label>Pay down debt <select id="clipFlowDebt">${accountOptions(block.debtAccountId, account => account.type === 'debt')}</select></label>`}
+        </div>
       </section>
       ${selected ? `
       <section class="clip-inspector">
@@ -277,6 +292,11 @@ export function initUI(state) {
       block.useCustomSchedule = false;
       renderBlockEditor();
     });
+    document.getElementById('clipFlowName').addEventListener('change', event => { block.description = event.target.value; renderBlockEditor(); });
+    document.getElementById('clipFlowSigma').addEventListener('change', event => { block.sigma = parseFloat(event.target.value || 0) / 100; });
+    document.getElementById('clipFlowAccount').addEventListener('change', event => { if (isIncome) block.targetAccountId = event.target.value || null; else block.sourceAccountId = event.target.value || null; });
+    document.getElementById('clipFlowPretax')?.addEventListener('change', event => { block.preTax = event.target.checked; });
+    document.getElementById('clipFlowDebt')?.addEventListener('change', event => { block.debtAccountId = event.target.value || null; });
     if (!selected) return;
     document.getElementById('clipName').addEventListener('change', event => { selected.name = event.target.value.trim() || `Clip ${editorState.clipIndex + 1}`; renderBlockEditor(); });
     document.getElementById('clipAmount').addEventListener('change', event => { selected.annualAmount = parseFloat(event.target.value || 0); renderBlockEditor(); });
@@ -386,6 +406,15 @@ export function initUI(state) {
     renderGlobalSegments();
   });
 
+  function renderNavAccounts() {
+    const navAccounts = document.getElementById('navAccounts');
+    navAccounts.innerHTML = Object.values(state.accounts).map(acc => `
+      <div class="nav-account ${acc.type === 'debt' ? 'nav-account--debt' : ''}">
+        <span class="nav-account-name">${escapeHtml(acc.name)}</span>
+        <span class="nav-account-value">${formatCompactMoney(acc.balance)}</span>
+      </div>`).join('');
+  }
+
   function renderAccounts(expandedId = null) {
     accountsDiv.innerHTML = '';
     for (const acc of Object.values(state.accounts)) {
@@ -432,11 +461,12 @@ export function initUI(state) {
         editButton.setAttribute('aria-expanded', String(willExpand));
       });
       el.querySelector('.remove').addEventListener('click', () => { delete state.accounts[acc.id]; renderAccounts(); renderBlocks(); });
-      el.querySelector('.acc-name').addEventListener('input', e => { acc.name = e.target.value; el.querySelector('strong').textContent = acc.name; renderBlocks(); });
+      el.querySelector('.acc-name').addEventListener('input', e => { acc.name = e.target.value; el.querySelector('strong').textContent = acc.name; renderNavAccounts(); renderBlocks(); });
       el.querySelector('.acc-type').addEventListener('change', e => { acc.type = e.target.value; renderAccounts(acc.id); renderBlocks(); });
       el.querySelector('.acc-balance').addEventListener('input', e => {
         acc.balance = parseFloat(e.target.value || 0);
         el.querySelector('.card-meta').textContent = `${ACCOUNT_TYPE_LABELS[acc.type]} · ${formatCompactMoney(acc.balance)}`;
+        renderNavAccounts();
       });
       el.querySelector('.acc-sigma').addEventListener('input', e => { acc.sigma = parseFloat(e.target.value || 0) / 100; });
 
@@ -454,12 +484,7 @@ export function initUI(state) {
       });
     }
 
-    const navAccounts = document.getElementById('navAccounts');
-    navAccounts.innerHTML = Object.values(state.accounts).map(acc => `
-      <div class="nav-account ${acc.type === 'debt' ? 'nav-account--debt' : ''}">
-        <span class="nav-account-name">${acc.name}</span>
-        <span class="nav-account-value">${formatCompactMoney(acc.balance)}</span>
-      </div>`).join('');
+    renderNavAccounts();
   }
 
   /** Renders a horizontal "axis" showing each amount-schedule segment as a proportionally-sized bar, with gaps shown as $0. */

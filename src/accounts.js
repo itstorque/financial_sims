@@ -1,16 +1,17 @@
 // Account types and fill/withdraw logic.
 import { ReturnsSchedule } from './returnsSchedule.js';
 
-// checking/hysa/taxable/retirement grow (or shrink) like normal investments.
+// checking/hysa/taxable/retirement/roth grow (or shrink) like normal investments.
 // 'debt' accounts hold a negative balance that *appreciates* (grows more
 // negative) at its own interest rate unless paid down by an expense block.
-export const ACCOUNT_TYPES = ['checking', 'hysa', 'taxable', 'retirement', 'debt'];
+export const ACCOUNT_TYPES = ['checking', 'hysa', 'taxable', 'retirement', 'roth', 'debt'];
 
 export const ACCOUNT_TYPE_LABELS = {
   checking: 'Checking',
   hysa: 'HYSA / Savings',
   taxable: 'Taxable Brokerage',
   retirement: 'Retirement (401k/IRA)',
+  roth: 'Roth IRA',
   debt: 'Debt (loan/credit card)',
 };
 
@@ -33,7 +34,7 @@ export class Account {
   }
 }
 
-/** Returns true if contributions to this account type are tax-deferred (traditional retirement). */
+/** Returns true if contributions to this account type are tax-deferred (traditional retirement). Roth is post-tax, not tax-deferred. */
 export function isTaxDeferred(account) {
   return account.type === 'retirement';
 }

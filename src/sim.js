@@ -157,6 +157,7 @@ export class Simulator {
 
     const timeline = []; // per month: {p10,p50,p90,mean}
     const byAccountTypeTimeline = []; // per month: {checking,hysa,taxable,retirement,debt}
+    const byAccountTimeline = []; // per month: mean balance keyed by account id
     let resampleEvents = 0;
     let fireSuccessRate = null;
     let fireNumber = null;
@@ -232,13 +233,17 @@ export class Simulator {
       const mean = totals.reduce((a, b) => a + b, 0) / totals.length;
       timeline.push({ p10: percentile(totals, 0.10), p50: percentile(totals, 0.50), p90: percentile(totals, 0.90), mean });
 
-      const typeSums = { checking: 0, hysa: 0, taxable: 0, retirement: 0, debt: 0 };
+      const typeSums = { checking: 0, hysa: 0, taxable: 0, retirement: 0, roth: 0, debt: 0 };
+      const accountSums = Object.fromEntries(Object.keys(accounts).map(id => [id, 0]));
       for (const p of pf.particles) {
         for (const [id, acc] of Object.entries(accounts)) {
-          typeSums[acc.type] = (typeSums[acc.type] || 0) + p.accountBalances[id] / pf.particles.length;
+          const meanContribution = p.accountBalances[id] / pf.particles.length;
+          typeSums[acc.type] = (typeSums[acc.type] || 0) + meanContribution;
+          accountSums[id] += meanContribution;
         }
       }
       byAccountTypeTimeline.push(typeSums);
+      byAccountTimeline.push(accountSums);
 
       if (this.retirementMonthIndex != null && m === this.retirementMonthIndex) {
         fireNumber = this._fireNumberAt(m);
@@ -262,6 +267,7 @@ export class Simulator {
     return {
       timeline,
       byAccountTypeTimeline,
+      byAccountTimeline,
       solvencyRate,
       resampleEvents,
       fireStats,

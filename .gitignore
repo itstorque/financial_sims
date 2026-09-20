@@ -1,0 +1,8 @@
+# Personal financial data — never commit your real numbers.
+# Create your own by exporting a scenario from the app ("Export JSON" in the
+# Scenarios panel) and saving it here as me.json. See me.example.json for the
+# expected shape/format.
+me.json
+
+# OS/editor cruft
+.DS_Store

@@ -8,6 +8,29 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   </head>
   <body>
+    <dialog id="blockEditor" class="editor-dialog" aria-labelledby="blockEditorTitle">
+      <div class="editor-shell">
+        <header class="editor-header">
+          <h2 id="blockEditorTitle">Cash flow</h2>
+          <button id="closeBlockEditor" class="icon-button secondary" type="button" aria-label="Close editor">×</button>
+        </header>
+        <div class="editor-layout">
+          <aside class="editor-sidebar">
+            <div class="editor-sidebar-title">
+              <span>Entries</span>
+              <span id="editorBlockCount" class="count-pill"></span>
+            </div>
+            <nav id="editorBlockList" class="editor-block-list" aria-label="Income and expenses"></nav>
+            <div class="editor-add-actions">
+              <button id="editorAddIncome" type="button">+ Income</button>
+              <button id="editorAddExpense" class="secondary" type="button">+ Expense</button>
+            </div>
+          </aside>
+          <section id="editorDetail" class="editor-detail"></section>
+        </div>
+      </div>
+    </dialog>
+
     <div class="app-shell">
       <aside class="app-nav">
         <div class="brand"><span class="brand-symbol" aria-hidden="true">F</span><h1>Financial Simulator</h1></div>
@@ -99,18 +122,76 @@
         <div class="results-heading">
           <h2>Forecast</h2>
         </div>
-        <article class="chart-card">
+        <article id="balanceChartCard" class="chart-card">
           <div class="chart-heading">
             <h3>Net worth range</h3>
+            <div class="chart-actions">
+              <label class="chart-control">Axes
+                <select id="balanceScale">
+                  <option value="linear">Linear</option>
+                  <option value="log-y">Log Y</option>
+                  <option value="log-x">Log X</option>
+                  <option value="log-xy">Log X + Y</option>
+                </select>
+              </label>
+              <button class="secondary chart-fullscreen" data-fullscreen="balanceChartCard" type="button">Full screen</button>
+            </div>
           </div>
+          <details class="axis-settings">
+            <summary>View &amp; zoom</summary>
+            <div class="axis-settings-grid">
+              <label>X from <input id="balanceXMin" type="month"/></label>
+              <label>X to <input id="balanceXMax" type="month"/></label>
+              <label>Y minimum <input id="balanceYMin" type="number" placeholder="Auto"/></label>
+              <label>Y maximum <input id="balanceYMax" type="number" placeholder="Auto"/></label>
+              <div class="axis-buttons">
+                <button id="balanceApplyView" type="button">Apply</button>
+                <button id="balanceZoomIn" class="secondary" type="button">Zoom in</button>
+                <button id="balanceZoomOut" class="secondary" type="button">Zoom out</button>
+                <button id="balanceResetView" class="secondary" type="button">Reset</button>
+              </div>
+            </div>
+          </details>
           <div class="chart-frame chart-frame--large">
             <canvas id="balanceChart"></canvas>
           </div>
         </article>
-        <article class="chart-card">
+        <article id="compositionChartCard" class="chart-card">
           <div class="chart-heading">
             <h3>Account mix</h3>
+            <div class="chart-actions">
+              <label class="chart-control">Axes
+                <select id="compositionScale">
+                  <option value="linear">Linear</option>
+                  <option value="log-y">Log Y</option>
+                  <option value="log-x">Log X</option>
+                  <option value="log-xy">Log X + Y</option>
+                </select>
+              </label>
+              <details class="account-filter">
+                <summary>Filter accounts</summary>
+                <div id="accountFilterMenu" class="account-filter-menu">
+                  <span class="small">Run the simulation to choose accounts.</span>
+                </div>
+              </details>
+              <button class="secondary chart-fullscreen" data-fullscreen="compositionChartCard" type="button">Full screen</button>
+            </div>
           </div>
+          <details class="axis-settings">
+            <summary>View &amp; zoom</summary>
+            <div class="axis-settings-grid">
+              <label>X from <input id="compositionXMin" type="month"/></label>
+              <label>X to <input id="compositionXMax" type="month"/></label>
+              <label>Y minimum <input id="compositionYMin" type="number" placeholder="Auto"/></label>
+              <label>Y maximum <input id="compositionYMax" type="number" placeholder="Auto"/></label>
+              <div class="axis-buttons">
+                <button id="compositionApplyView" type="button">Apply</button>
+                <button id="compositionZoomIn" class="secondary" type="button">Zoom in</button>
+                <button id="compositionZoomOut" class="secondary" type="button">Zoom out</button>
+                <button id="compositionResetView" class="secondary" type="button">Reset</button>
+              </div>
+            </div>
+          </details>
           <div class="chart-frame chart-frame--small">
             <canvas id="compositionChart"></canvas>
           </div>

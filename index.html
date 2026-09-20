@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Financial Simulator</title>
     <link rel="stylesheet" href="styles.css" />
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   </head>
   <body>
     <dialog id="blockEditor" class="editor-dialog" aria-labelledby="blockEditorTitle">
@@ -52,6 +52,7 @@
             <label>City <select id="citySelect"></select></label>
             <label>Particles <input id="numParticles" type="number" value="300" min="20" max="2000" step="20"/></label>
             <label class="inline"><input id="useParticleFilter" type="checkbox" checked/> Resampling</label>
+            <label class="inline"><input id="realDollars" type="checkbox"/> Show in today's $</label>
             <button id="runSim" class="primary">Run simulation</button>
           </div>
           <div id="summaryStats" class="summary"></div>
@@ -68,11 +69,10 @@
             <label>Notes <textarea id="scenarioNotes" rows="3"></textarea></label>
           </div>
           <div class="row">
-            <button id="saveScenario">Save</button>
             <button id="exportScenario" class="secondary" type="button">Export JSON</button>
-            <select id="scenarioSelect"></select>
-            <button id="loadScenario">Load</button>
-            <button id="deleteScenario" class="remove">Delete</button>
+            <button id="loadScenario" type="button">Load JSON</button>
+            <button id="loadExampleScenario" class="secondary" type="button">Test load example</button>
+            <input id="scenarioFile" type="file" accept="application/json,.json" hidden/>
           </div>
           <div class="row">
             <button id="resetToBase" class="secondary" type="button">Reset to base scenario</button>
@@ -84,6 +84,12 @@
           <summary><h2>Accounts</h2></summary>
           <div id="accounts"></div>
           <button id="addAccount">+ Add Account</button>
+        </details>
+
+        <details id="withdrawal-order">
+          <summary><h2>Retirement Withdrawal Order</h2></summary>
+          <p class="small">When an expense can't be fully covered by its normal account, the simulator drains the remaining accounts in this order — this mostly kicks in after retirement, once paychecks stop. Reorder to match your intended drawdown strategy (a common approach: cash/savings first, then taxable brokerage, then traditional retirement, then Roth last).</p>
+          <div id="withdrawalOrderList"></div>
         </details>
 
         <details id="cash-flow" open>
@@ -104,6 +110,26 @@
             <label>Default annual % <input id="defaultAnnual" type="number" step="0.1" value="6"/></label>
             <label>Default σ % <input id="defaultSigma" type="number" step="0.1" value="9"/></label>
           </div>
+        </details>
+
+        <details id="sim-settings">
+          <summary><h2>Inflation &amp; Taxes</h2></summary>
+          <div class="row">
+            <label>Inflation (annual %) <input id="inflationRate" type="number" step="0.1" value="3"/></label>
+          </div>
+          <p class="small">Escalates income/expense blocks over time (uncheck "Escalate with inflation" on a specific block to keep it fixed in nominal dollars). Use the "Show in today's $" toggle above to view forecasts in inflation-adjusted terms without re-running the simulation.</p>
+          <label class="inline"><input id="capGainsEnabled" type="checkbox"/> Model capital gains tax on taxable-brokerage withdrawals</label>
+          <div class="row">
+            <label>Capital gains tax rate % <input id="capGainsRate" type="number" step="0.5" value="15"/></label>
+          </div>
+          <p class="small">Simplified: assumes the taxable account's starting balance is 100% cost basis (no embedded gains today), and applies a flat rate to the gain portion of each withdrawal — no long/short-term distinction.</p>
+        </details>
+
+        <details id="market-events">
+          <summary><h2>Rare Market Events</h2></summary>
+          <p class="small">Model asymmetric risks separately from normal volatility. Each simulation path independently decides whether an event occurs and, if so, when it begins inside the trigger window.</p>
+          <div id="marketEvents"></div>
+          <button id="addMarketEvent" type="button">+ Add Probabilistic Event</button>
         </details>
 
         <details>
@@ -129,6 +155,14 @@
           <div class="chart-heading">
             <h3>Net worth range</h3>
             <div class="chart-actions">
+              <label class="chart-check"><input id="showIndividualTraces" type="checkbox"/> Paths</label>
+              <label class="chart-control trace-count">Show
+                <select id="individualTraceCount" disabled>
+                  <option value="10">10 paths</option>
+                  <option value="25" selected>25 paths</option>
+                  <option value="50">50 paths</option>
+                </select>
+              </label>
               <label class="chart-control">Axes
                 <select id="balanceScale">
                   <option value="linear">Linear</option>
@@ -137,26 +171,12 @@
                   <option value="log-xy">Log X + Y</option>
                 </select>
               </label>
-              <button class="secondary chart-fullscreen" data-fullscreen="balanceChartCard" type="button">Full screen</button>
+              <button class="secondary chart-fullscreen" data-fullscreen="balanceChartCard" type="button" title="Full screen" aria-label="Full screen">⛶</button>
             </div>
           </div>
-          <details class="axis-settings">
-            <summary>View &amp; zoom</summary>
-            <div class="axis-settings-grid">
-              <label>X from <input id="balanceXMin" type="month"/></label>
-              <label>X to <input id="balanceXMax" type="month"/></label>
-              <label>Y minimum <input id="balanceYMin" type="number" placeholder="Auto"/></label>
-              <label>Y maximum <input id="balanceYMax" type="number" placeholder="Auto"/></label>
-              <div class="axis-buttons">
-                <button id="balanceApplyView" type="button">Apply</button>
-                <button id="balanceZoomIn" class="secondary" type="button">Zoom in</button>
-                <button id="balanceZoomOut" class="secondary" type="button">Zoom out</button>
-                <button id="balanceResetView" class="secondary" type="button">Reset</button>
-              </div>
-            </div>
-          </details>
           <div class="chart-frame chart-frame--large">
-            <canvas id="balanceChart"></canvas>
+            <div id="balanceChart" class="plotly-chart" aria-label="Net worth forecast chart"></div>
+            <div class="plot-hint">Drag to pan · Scroll to zoom · Use the toolbar to box zoom or reset</div>
           </div>
         </article>
         <article id="compositionChartCard" class="chart-card">
@@ -177,26 +197,12 @@
                   <span class="small">Run the simulation to choose accounts.</span>
                 </div>
               </details>
-              <button class="secondary chart-fullscreen" data-fullscreen="compositionChartCard" type="button">Full screen</button>
+              <button class="secondary chart-fullscreen" data-fullscreen="compositionChartCard" type="button" title="Full screen" aria-label="Full screen">⛶</button>
             </div>
           </div>
-          <details class="axis-settings">
-            <summary>View &amp; zoom</summary>
-            <div class="axis-settings-grid">
-              <label>X from <input id="compositionXMin" type="month"/></label>
-              <label>X to <input id="compositionXMax" type="month"/></label>
-              <label>Y minimum <input id="compositionYMin" type="number" placeholder="Auto"/></label>
-              <label>Y maximum <input id="compositionYMax" type="number" placeholder="Auto"/></label>
-              <div class="axis-buttons">
-                <button id="compositionApplyView" type="button">Apply</button>
-                <button id="compositionZoomIn" class="secondary" type="button">Zoom in</button>
-                <button id="compositionZoomOut" class="secondary" type="button">Zoom out</button>
-                <button id="compositionResetView" class="secondary" type="button">Reset</button>
-              </div>
-            </div>
-          </details>
           <div class="chart-frame chart-frame--small">
-            <canvas id="compositionChart"></canvas>
+            <div id="compositionChart" class="plotly-chart" aria-label="Account mix chart"></div>
+            <div class="plot-hint">Drag to pan · Scroll to zoom · Use the toolbar to box zoom or reset</div>
           </div>
         </article>
       </section>

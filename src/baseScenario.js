@@ -99,6 +99,10 @@ export function buildBaseScenario() {
     city: 'San Francisco, CA',
     numParticles: '300',
     useParticleFilter: true,
+    inflationRate: '3',
+    realDollars: false,
+    capGainsEnabled: false,
+    capGainsRate: '15',
   };
 
   const notes = [
@@ -110,12 +114,21 @@ export function buildBaseScenario() {
       `- Kid 1: born ~${kid1BirthMonth} (6 years from now). Kid 2: born ~${kid2BirthMonth} (8 years from now). Each modeled with an SF-calibrated cost-of-living curve by age (infant/toddler daycare years are the most expensive) — see childCostModel.js. These are illustrative, not sourced from real SF childcare pricing data.`,
     '- Starting balances are placeholders: Checking $50k, Savings (HYSA) $200k, Taxable $0, Retirement (401k/IRA, combined) $300k, Roth IRA $500k.',
     '- Market returns use the global default schedule (edit under "Global Returns Schedule").',
+    '- Inflation defaults to 3%/yr, escalating most income/expense blocks; capital gains tax on taxable-brokerage withdrawals is off by default (enable it under "Simulation Settings"). Retirement withdrawal order defaults to Savings → Taxable → Retirement → Roth (reorder under "Retirement Withdrawal Order").',
   ].join('\n');
 
   return {
     name: BASE_SCENARIO_NAME,
     settings,
     notes,
-    state: { accounts, blocks, globalReturnsSchedule: defaultReturnsSchedule() },
+    state: {
+      accounts, blocks, globalReturnsSchedule: defaultReturnsSchedule(), marketEvents: [],
+      // Tax-efficient default drawdown order: cash-like savings first, then
+      // taxable brokerage (capital gains), then traditional retirement
+      // (ordinary income when withdrawn, not modeled here), then Roth last so
+      // it compounds tax-free the longest. Checking is excluded — it's
+      // typically the primary spending account topped up by this cascade.
+      withdrawalOrder: [hysa.id, taxable.id, retirement.id, roth.id],
+    },
   };
 }

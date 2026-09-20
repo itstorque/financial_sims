@@ -2,9 +2,8 @@ import { Simulator } from './sim.js';
 import { initUI } from './ui.js';
 import { renderBalanceChart, renderCompositionChart } from './plot.js';
 
-const state = { accounts: null, blocks: null, globalReturnsSchedule: null };
+const state = { accounts: null, blocks: null, globalReturnsSchedule: null, marketEvents: [] };
 let lastChartData = null;
-const chartViews = { balance: {}, composition: {} };
 
 function formatMoney(v) {
   return '$' + Math.round(v).toLocaleString();
@@ -24,6 +23,9 @@ async function main() {
     const retireAge = parseInt(document.getElementById('retireAge').value, 10);
     const numParticles = parseInt(document.getElementById('numParticles').value, 10) || 300;
     const useParticleFilter = document.getElementById('useParticleFilter').checked;
+    const inflationRate = (parseFloat(document.getElementById('inflationRate').value) || 0) / 100;
+    const capGainsEnabled = document.getElementById('capGainsEnabled').checked;
+    const capGainsRate = (parseFloat(document.getElementById('capGainsRate').value) || 0) / 100;
     const city = ui.getCity();
 
     const yearsToRetirement = Math.max(0, retireAge - curAge);
@@ -39,10 +41,14 @@ async function main() {
       accounts: state.accounts,
       blocks: state.blocks,
       globalReturnsSchedule: state.globalReturnsSchedule,
+      marketEvents: state.marketEvents,
       city,
       numParticles,
       useParticleFilter,
       retirementMonthIndex,
+      inflationRate,
+      capitalGains: { enabled: capGainsEnabled, rate: capGainsRate },
+      withdrawalOrder: state.withdrawalOrder || [],
     });
 
     const out = sim.run();
@@ -56,9 +62,7 @@ async function main() {
     const p10 = out.timeline.map(t => t.p10);
     const p90 = out.timeline.map(t => t.p90);
 
-    lastChartData = { labels, median, p10, p90, byAccountTimeline: out.byAccountTimeline };
-    resetView('balance', false);
-    resetView('composition', false);
+    lastChartData = { labels, median, p10, p90, byAccountTimeline: out.byAccountTimeline, marketEventStats: out.marketEventStats, individualTraces: out.individualTraces };
     renderBalance();
     renderAccountFilters();
     renderAccountMix();
@@ -75,13 +79,37 @@ async function main() {
     if (useParticleFilter) {
       parts.push(`<span>Resample events: <b>${out.resampleEvents}</b></span>`);
     }
+    for (const event of out.marketEventStats || []) {
+      parts.push(`<span>${escapeHtml(event.name)} triggered: <b>${(event.triggerRate * 100).toFixed(1)}%</b> of paths</span>`);
+    }
     summary.innerHTML = parts.join('');
   });
+
+  function inflationFactorAt(monthIndex) {
+    const rate = (parseFloat(document.getElementById('inflationRate').value) || 0) / 100;
+    return Math.pow(1 + rate, monthIndex / 12);
+  }
+
+  function maybeDeflateSeries(series) {
+    if (!document.getElementById('realDollars').checked) return series;
+    return series.map((v, m) => v / inflationFactorAt(m));
+  }
+
+  function maybeDeflateAccountTimeline(rows) {
+    if (!document.getElementById('realDollars').checked) return rows;
+    return rows.map((row, m) => {
+      const factor = inflationFactorAt(m);
+      return Object.fromEntries(Object.entries(row).map(([id, v]) => [id, v / factor]));
+    });
+  }
 
   function renderBalance() {
     if (!lastChartData) return;
     const { labels, median, p10, p90 } = lastChartData;
-    renderBalanceChart(document.getElementById('balanceChart').getContext('2d'), labels, median, p10, p90, document.getElementById('balanceScale').value, chartViews.balance);
+    const showTraces = document.getElementById('showIndividualTraces').checked;
+    const traceCount = parseInt(document.getElementById('individualTraceCount').value, 10) || 25;
+    const individualTraces = showTraces ? lastChartData.individualTraces.slice(0, traceCount).map(maybeDeflateSeries) : [];
+    renderBalanceChart(document.getElementById('balanceChart'), labels, maybeDeflateSeries(median), maybeDeflateSeries(p10), maybeDeflateSeries(p90), document.getElementById('balanceScale').value, lastChartData.marketEventStats, individualTraces);
   }
 
   function selectedAccountIds() {
@@ -90,7 +118,7 @@ async function main() {
 
   function renderAccountMix() {
     if (!lastChartData) return;
-    renderCompositionChart(document.getElementById('compositionChart').getContext('2d'), lastChartData.labels, lastChartData.byAccountTimeline, state.accounts, selectedAccountIds(), document.getElementById('compositionScale').value, chartViews.composition);
+    renderCompositionChart(document.getElementById('compositionChart'), lastChartData.labels, maybeDeflateAccountTimeline(lastChartData.byAccountTimeline), state.accounts, selectedAccountIds(), document.getElementById('compositionScale').value, lastChartData.marketEventStats);
   }
 
   function renderAccountFilters() {
@@ -101,115 +129,55 @@ async function main() {
 
   document.getElementById('balanceScale').addEventListener('change', renderBalance);
   document.getElementById('compositionScale').addEventListener('change', renderAccountMix);
+  document.getElementById('realDollars').addEventListener('change', () => { renderBalance(); renderAccountMix(); });
+  document.getElementById('showIndividualTraces').addEventListener('change', event => {
+    document.getElementById('individualTraceCount').disabled = !event.target.checked;
+    renderBalance();
+  });
+  document.getElementById('individualTraceCount').addEventListener('change', renderBalance);
 
-  function viewInputs(prefix) {
-    return {
-      xMin: document.getElementById(`${prefix}XMin`),
-      xMax: document.getElementById(`${prefix}XMax`),
-      yMin: document.getElementById(`${prefix}YMin`),
-      yMax: document.getElementById(`${prefix}YMax`),
-    };
+  function resizePlots() {
+    requestAnimationFrame(() => {
+      Plotly.Plots.resize(document.getElementById('balanceChart'));
+      Plotly.Plots.resize(document.getElementById('compositionChart'));
+    });
   }
 
-  function renderChart(prefix) {
-    if (prefix === 'balance') renderBalance();
-    else renderAccountMix();
-  }
-
-  function applyView(prefix) {
-    if (!lastChartData) return;
-    const inputs = viewInputs(prefix);
-    const xMinIndex = inputs.xMin.value ? lastChartData.labels.indexOf(inputs.xMin.value) : 0;
-    const xMaxIndex = inputs.xMax.value ? lastChartData.labels.indexOf(inputs.xMax.value) : lastChartData.labels.length - 1;
-    if (xMinIndex < 0 || xMaxIndex < 0 || xMinIndex >= xMaxIndex) {
-      inputs.xMin.setCustomValidity('Choose a start month before the end month within the simulation.');
-      inputs.xMin.reportValidity();
-      return;
-    }
-    inputs.xMin.setCustomValidity('');
-    const yMin = inputs.yMin.value === '' ? undefined : Number(inputs.yMin.value);
-    const yMax = inputs.yMax.value === '' ? undefined : Number(inputs.yMax.value);
-    if (yMin != null && yMax != null && yMin >= yMax) {
-      inputs.yMin.setCustomValidity('Y minimum must be less than Y maximum.');
-      inputs.yMin.reportValidity();
-      return;
-    }
-    inputs.yMin.setCustomValidity('');
-    chartViews[prefix] = { xMin: inputs.xMin.value, xMax: inputs.xMax.value, yMin, yMax };
-    renderChart(prefix);
-  }
-
-  function resetView(prefix, render = true) {
-    chartViews[prefix] = {};
-    const inputs = viewInputs(prefix);
-    inputs.xMin.value = lastChartData?.labels[0] || '';
-    inputs.xMax.value = lastChartData?.labels.at(-1) || '';
-    inputs.yMin.value = '';
-    inputs.yMax.value = '';
-    if (render) renderChart(prefix);
-  }
-
-  function zoomView(prefix, factor) {
-    if (!lastChartData) return;
-    const chart = prefix === 'balance' ? window._balanceChart : window._compositionChart;
-    if (!chart) return;
-    const inputs = viewInputs(prefix);
-    const labels = lastChartData.labels;
-    let xMin = Math.max(0, Math.round(chart.scales.x.min));
-    let xMax = Math.min(labels.length - 1, Math.round(chart.scales.x.max));
-    if (chart.scales.x.type === 'logarithmic') { xMin--; xMax--; }
-    const xCenter = (xMin + xMax) / 2;
-    const xHalf = Math.max(1, (xMax - xMin) * factor / 2);
-    xMin = Math.max(0, Math.floor(xCenter - xHalf));
-    xMax = Math.min(labels.length - 1, Math.ceil(xCenter + xHalf));
-
-    const currentYMin = chart.scales.y.min;
-    const currentYMax = chart.scales.y.max;
-    let yMin;
-    let yMax;
-    if (chart.scales.y.type === 'logarithmic' && currentYMin > 0) {
-      const logMin = Math.log10(currentYMin);
-      const logMax = Math.log10(currentYMax);
-      const center = (logMin + logMax) / 2;
-      const half = (logMax - logMin) * factor / 2;
-      yMin = 10 ** (center - half);
-      yMax = 10 ** (center + half);
-    } else {
-      const center = (currentYMin + currentYMax) / 2;
-      const half = Math.max(1, (currentYMax - currentYMin) * factor / 2);
-      yMin = center - half;
-      yMax = center + half;
-    }
-    inputs.xMin.value = labels[xMin];
-    inputs.xMax.value = labels[xMax];
-    inputs.yMin.value = Number(yMin.toPrecision(8));
-    inputs.yMax.value = Number(yMax.toPrecision(8));
-    applyView(prefix);
-  }
-
-  for (const prefix of ['balance', 'composition']) {
-    document.getElementById(`${prefix}ApplyView`).addEventListener('click', () => applyView(prefix));
-    document.getElementById(`${prefix}ResetView`).addEventListener('click', () => resetView(prefix));
-    document.getElementById(`${prefix}ZoomIn`).addEventListener('click', () => zoomView(prefix, 0.5));
-    document.getElementById(`${prefix}ZoomOut`).addEventListener('click', () => zoomView(prefix, 2));
+  function closeExpandedChart() {
+    const card = document.querySelector('.chart-card.is-fullscreen');
+    if (!card) return;
+    card.classList.remove('is-fullscreen');
+    document.body.classList.remove('plot-fullscreen-open');
+    document.querySelectorAll('[data-fullscreen]').forEach(button => {
+      button.textContent = '⛶';
+      button.title = 'Full screen';
+      button.setAttribute('aria-label', 'Full screen');
+      button.setAttribute('aria-pressed', 'false');
+    });
+    resizePlots();
   }
 
   document.querySelectorAll('[data-fullscreen]').forEach(button => {
-    button.addEventListener('click', async () => {
+    button.setAttribute('aria-pressed', 'false');
+    button.addEventListener('click', () => {
       const card = document.getElementById(button.dataset.fullscreen);
-      if (document.fullscreenElement === card) await document.exitFullscreen();
-      else await card.requestFullscreen();
+      if (card.classList.contains('is-fullscreen')) {
+        closeExpandedChart();
+        return;
+      }
+      closeExpandedChart();
+      card.classList.add('is-fullscreen');
+      document.body.classList.add('plot-fullscreen-open');
+      button.textContent = '×';
+      button.title = 'Exit full screen';
+      button.setAttribute('aria-label', 'Exit full screen');
+      button.setAttribute('aria-pressed', 'true');
+      resizePlots();
     });
   });
 
-  document.addEventListener('fullscreenchange', () => {
-    document.querySelectorAll('[data-fullscreen]').forEach(button => {
-      button.textContent = document.fullscreenElement?.id === button.dataset.fullscreen ? 'Exit full screen' : 'Full screen';
-    });
-    requestAnimationFrame(() => {
-      window._balanceChart?.resize();
-      window._compositionChart?.resize();
-    });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') closeExpandedChart();
   });
 }
 

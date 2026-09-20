@@ -144,7 +144,7 @@ export function createBlock({
   id, category, kind = 'continuous', description = '', amount = 0,
   startMonth, endMonth = null, preTax = false, targetAccountId = null,
   sourceAccountId = null, debtAccountId = null, sigma = 0,
-  useCustomSchedule = false, amountSchedule = null,
+  useCustomSchedule = false, amountSchedule = null, inflationAdjusted = true,
 } = {}) {
   return {
     id: id || nextBlockId(),
@@ -160,6 +160,11 @@ export function createBlock({
     debtAccountId,     // optional: an expense that also pays down a debt account
     sigma: Number(sigma) || 0,
     useCustomSchedule: !!useCustomSchedule, // continuous blocks only
+    // Whether this block's nominal amount escalates with the global inflation
+    // rate over the course of the simulation (see sim.js precomputeBlockAmounts).
+    // Defaults to true since most real-world income/expenses grow with inflation;
+    // uncheck for a fixed nominal contract amount.
+    inflationAdjusted: inflationAdjusted !== false,
     amountSchedule: amountSchedule instanceof AmountSchedule
       ? amountSchedule
       : new AmountSchedule((amountSchedule && amountSchedule.entries) || (startMonth ? [{ from: startMonth, to: '9999-12', annualAmount: amount }] : [])),

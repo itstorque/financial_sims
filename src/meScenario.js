@@ -15,7 +15,7 @@
 // resolves to null and the caller should fall back to the generic example
 // scenario (see baseScenario.js).
 
-import { reviveState } from './persistence.js';
+import { reviveScenarioExport } from './persistence.js';
 
 export const ME_JSON_PATH = './me.json';
 
@@ -37,12 +37,7 @@ export async function loadMeScenario(path = ME_JSON_PATH) {
   }
 
   try {
-    return {
-      name: data.name || 'Me',
-      settings: data.settings || {},
-      notes: data.notes || '',
-      state: reviveState(data.state || {}),
-    };
+    return reviveScenarioExport(data);
   } catch (err) {
     console.warn('me.json was found but could not be loaded into the app; ignoring it.', err);
     return null;

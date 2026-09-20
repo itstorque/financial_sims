@@ -29,11 +29,15 @@ server avoids any module-loading quirks in some browsers.)
 - **Financed purchases (loan blocks)**: a dedicated block type for a down payment + amortizing mortgage (or any loan), e.g. buying a house. Given a purchase price, down-payment %, annual rate, and term, it automatically originates a linked `debt` account for the loan principal at the purchase month and applies the standard fixed monthly P&I payment thereafter — reusing the normal debt-interest-accrual machinery for correct amortization.
 - **Progressive taxes**: real marginal-bracket math for federal income tax (2024 single-filer brackets + standard deduction), state brackets/flat rates and local tax by city (dropdown), and FICA (Social Security up to the wage base + Medicare + additional Medicare surtax). Traditional-retirement contributions (income blocks targeting a `retirement` account with "pre-tax" checked) are excluded from taxable income for the year (tax-deferred) but still subject to FICA. Effective tax rate is computed **per calendar year** from all pre-tax income active that year, then applied to each month's credited amount. This is a planning approximation, not tax advice (no itemized deductions/credits/AMT/etc).
 - **Debts as "appreciating" accounts**: a debt account's negative balance grows via its returns schedule (interest), and expense blocks can optionally target a debt account to pay it down.
+- **Account drawdown waterfall with a configurable retirement withdrawal order**: withdrawals use the selected source first, then cascade through the accounts listed in "Retirement Withdrawal Order" (reorderable in the UI — e.g. savings → taxable → traditional retirement → Roth last, so Roth compounds tax-free the longest). Any account not explicitly ordered still falls back to a sensible type-based cascade. Asset accounts stop at $0; an uncovered remainder marks that simulation path insolvent instead of creating a negative cash or investment balance.
+- **Inflation**: a global annual inflation rate ("Inflation & Taxes" panel) escalates continuous/one-time income and expense amounts over time in the simulation (each block has an "Escalate with inflation" toggle to opt out, e.g. for a fixed nominal contract). The FIRE number is computed in the same escalated nominal terms as the simulated balances. A "Show in today's $" toggle re-renders the existing forecast charts in inflation-adjusted terms instantly, without re-running the simulation.
+- **Capital gains tax (optional)**: enable "Model capital gains tax on taxable-brokerage withdrawals" to apply a flat rate to the gain portion of any withdrawal from a `taxable`-type account, wherever it's drawn from (an expense, a loan payment, or the retirement withdrawal waterfall). Cost basis is tracked per account per Monte Carlo path, assuming the starting balance is 100% basis at t=0 (a stated simplification — no long/short-term distinction, no embedded gains at the start).
 - **Monte Carlo with a particle filter**: each of N particles independently samples noise for account returns (from the returns schedule's σ) and for block amounts (their own σ). Optionally, a lightweight particle filter (weight + systematic resampling when effective sample size drops) down-weights bankrupt trajectories so the ensemble stays representative of solvent futures — this is a modeling choice you can toggle off for plain, unweighted Monte Carlo.
+- **Rare market events**: add asymmetric risks such as a 15% chance of an AI/geopolitical crash beginning sometime in the next two years. Occurrence and start month are sampled independently for each Monte Carlo path; during the configured duration, the event return and volatility replace the ordinary schedule for investment accounts (or all non-debt accounts). The summary reports the realized share of paths in which each event triggered.
 - **FIRE math**: the "FIRE number" (25× nominal annual living expenses at your target retirement date) is compared against the simulated portfolio distribution to report a probability of reaching FIRE by your retirement age.
 - **House affordability**: a standalone 28/36-DTI mortgage calculator (binary-searches the max home price whose PITI+HOA fits your budget).
-- **Persistence and sharing**: your working session (top settings + accounts/blocks/returns schedule + notes) auto-saves to the browser continuously. You can explicitly **Save**, **Load**, or **Delete** named plans in the "Scenarios" panel — each with a free-form **notes** field for assumptions/context — and **Export JSON** creates a portable snapshot of the current plan for sharing or archiving.
-- **Seeded base scenario**: on first load (or whenever the named scenario is missing), a concrete example plan — "Base Case — SF Household" — is created: a dual-income household (two salaries + stock comp), a $1.2M SF house purchase via a loan block, and two child cost-of-living curves. It's always reachable from the Scenarios dropdown even after you've customized your working session; see `src/baseScenario.js` for the exact assumptions.
+- **Persistence and sharing**: your working session (top settings + accounts/blocks/returns schedule + notes) auto-saves to the browser continuously. **Load JSON** imports a scenario selected from disk, while **Export JSON** creates a portable snapshot. **Test load example** always loads the bundled `me.example.json` fixture through the same import path.
+- **Seeded base scenario**: when no autosaved session is available, a concrete example plan — "Base Case — SF Household" — is created: a dual-income household (two salaries + stock comp), a $1.2M SF house purchase via a loan block, and two child cost-of-living curves; see `src/baseScenario.js` for the exact assumptions.
 - **Keep your real numbers out of git (`me.json`)**: if a `me.json` file exists next to `index.html`, it's loaded instead of the generic example on first run. `me.json` is listed in `.gitignore` so it's never committed. Create your own by filling out the app with your real data, clicking **Export JSON**, and saving the download as `me.json` at the project root — see `me.example.json` for the expected shape and `src/meScenario.js` for the loader.
 
 ## Project layout
@@ -50,23 +54,24 @@ server avoids any module-loading quirks in some browsers.)
   - `childCostModel.js` — an illustrative SF-calibrated cost-of-living-by-age curve for a child, as an `AmountSchedule` factory
   - `baseScenario.js` — builds the seeded "Base Case — SF Household" example plan (incomes, house loan, kids)
   - `meScenario.js` — fetches and revives an optional, gitignored `me.json` (your real data) in preference to the base scenario
-  - `persistence.js` — serialize/revive state (incl. loan blocks) to plain JSON + localStorage CRUD for autosave and named scenarios (with notes)
+  - `persistence.js` — serialize, validate, and revive scenario JSON (accounts, blocks, returns schedule, market events, withdrawal order) plus browser autosave persistence
   - `ui.js` — renders and wires all editable forms (mutates the shared `state` in place)
-  - `plot.js` — Chart.js wrappers (percentile bands, stacked account composition)
+  - `plot.js` — Plotly-based chart wrappers (percentile bands, stacked account composition, zoom/pan)
   - `app.js` — entry point: reads controls, runs `Simulator`, renders charts + summary stats
 - `test/smoke.mjs` — a dev-only Node script (`node test/smoke.mjs`) sanity-checking tax progressivity, sim output shape, debt/loan amortization, child-cost schedules, the base scenario, and affordability math
 
 ## Known simplifications (documented, not hidden)
 
-- Single-filer tax brackets only; no itemized deductions, credits, phase-outs, capital-gains rates, or state standard deductions.
+- Single-filer tax brackets only; no itemized deductions, credits, phase-outs, or state standard deductions. Capital gains tax (when enabled) is a flat rate with no long/short-term distinction, and assumes each taxable account's starting balance is 100% cost basis.
 - Retirement contribution limits (e.g. 401k caps) are not enforced.
+- Traditional-retirement withdrawals are not taxed as ordinary income when spent in retirement (only contributions are tax-deferred) — a known gap, see below.
 - Expense "debt payments" that exceed the remaining balance don't roll over as a credit.
 - The particle filter's bankruptcy-weighting introduces mild survivorship bias by design — a documented trade-off for keeping the percentile bands meaningful (toggle it off for raw Monte Carlo).
 
 ## Ideas for next iterations
 
-- Withdrawal-ordering strategies in retirement (e.g. taxable → traditional → Roth).
+- Tax traditional-retirement withdrawals as ordinary income (currently only contributions are tax-deferred; withdrawals are untaxed).
 - Social Security benefit estimation and claiming-age modeling.
 - Per-block custom probability distributions (not just Gaussian).
-- Importing previously exported scenario JSON files.
 - Tracking home value/equity as an appreciating asset (loan blocks currently model the liability side only).
+- Required minimum distributions (RMDs) from traditional retirement accounts.

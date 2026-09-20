@@ -6,6 +6,7 @@ import { ReturnsSchedule } from './returnsSchedule.js';
 import { blockActiveInMonth, sampledMonthlyAmount, nominalMonthlyAmount, loanPrincipal, loanMonthlyPayment, loanPaymentWindow } from './blocks.js';
 import { computeAnnualTax } from './taxes.js';
 import { ParticleFilter } from './particleFilter.js';
+import { createMarketEvent, sampleMarketEvents, activeMarketEvent } from './marketEvents.js';
 
 export { ReturnsSchedule };
 
@@ -49,14 +50,18 @@ function percentile(sortedVals, p) {
   return sortedVals[idx];
 }
 
-/** Precompute each block's sampled (noisy) contribution for every month of the sim. */
-function precomputeBlockAmounts(blocks, startDate, months) {
+/** Precompute each block's sampled (noisy) contribution for every month of the sim, escalated by the global inflation rate for blocks opted into it (default true — see blocks.js `inflationAdjusted`). */
+export function precomputeBlockAmounts(blocks, startDate, months, inflationRate = 0) {
   const perMonth = [];
   for (let m = 0; m < months; m++) {
     const date = monthIndex(startDate, m);
+    const inflationFactor = Math.pow(1 + inflationRate, m / 12);
     const row = {};
     for (const b of blocks) {
-      if (blockActiveInMonth(b, date)) row[b.id] = sampledMonthlyAmount(b, date);
+      if (!blockActiveInMonth(b, date)) continue;
+      let amt = sampledMonthlyAmount(b, date);
+      if (b.inflationAdjusted !== false) amt *= inflationFactor;
+      row[b.id] = amt;
     }
     perMonth.push(row);
   }
@@ -91,6 +96,75 @@ function firstAccountOfType(accounts, type) {
   return Object.values(accounts).find(a => a.type === type);
 }
 
+const DRAWDOWN_PRIORITY = ['checking', 'hysa', 'taxable', 'roth', 'retirement'];
+
+/**
+ * Withdraw from the requested source first, then cascade across other asset
+ * accounts. Asset balances never fall below zero. Any remainder is returned
+ * as a shortfall so the particle can be marked insolvent without inventing
+ * an overdraft balance.
+ *
+ * `options.withdrawalOrder` (array of account ids) lets the caller override
+ * the default type-based cascade with an explicit, user-configured priority
+ * (e.g. the "Retirement Withdrawal Order" list in the UI) — accounts not
+ * present in that list still fall back to the default type-based cascade so
+ * newly-added accounts are never silently skipped.
+ *
+ * `options.capitalGains` (`{enabled, rate}`) + `options.costBasis` (a
+ * per-particle `{accountId: basisDollars}` map, mutated in place) apply a
+ * simplified capital-gains tax whenever a `taxable`-type account is drawn
+ * from: the withdrawal is grossed up so that, after tax on the gain portion,
+ * the requested net amount is still delivered (or as much of it as the
+ * account can cover). Cost basis is reduced proportionally to the principal
+ * portion of what was withdrawn.
+ */
+export function drawFromAccounts(accountBalances, accounts, amount, preferredSourceId = null, options = {}) {
+  const { withdrawalOrder = [], costBasis = null, capitalGains = null } = options;
+  let remaining = Math.max(0, Number(amount) || 0);
+  const orderedIds = [];
+  const seen = new Set();
+  const consider = id => {
+    if (!id || seen.has(id)) return;
+    const acc = accounts[id];
+    if (!acc || acc.type === 'debt') return;
+    seen.add(id);
+    orderedIds.push(id);
+  };
+  consider(preferredSourceId);
+  for (const id of withdrawalOrder) consider(id);
+  for (const type of DRAWDOWN_PRIORITY) {
+    for (const account of Object.values(accounts)) {
+      if (account.type === type) consider(account.id);
+    }
+  }
+
+  for (const id of orderedIds) {
+    if (remaining <= 1e-9) break;
+    const available = Math.max(0, accountBalances[id] || 0);
+    if (available <= 0) continue;
+    const acc = accounts[id];
+
+    if (capitalGains?.enabled && acc.type === 'taxable' && costBasis) {
+      const basis = Math.min(costBasis[id] ?? available, available);
+      const gainFraction = Math.max(0, Math.min(1, (available - basis) / available));
+      const rate = Math.max(0, capitalGains.rate || 0);
+      const denom = 1 - gainFraction * rate;
+      const grossWanted = denom > 0 ? remaining / denom : remaining;
+      const gross = Math.min(grossWanted, available);
+      const net = gross * (1 - gainFraction * rate);
+      const basisPortion = gross * (basis / available);
+      accountBalances[id] = available - gross;
+      costBasis[id] = Math.max(0, basis - basisPortion);
+      remaining -= net;
+    } else {
+      const withdrawn = Math.min(available, remaining);
+      accountBalances[id] = available - withdrawn;
+      remaining -= withdrawn;
+    }
+  }
+  return { withdrawn: Math.max(0, amount - remaining), shortfall: Math.max(0, remaining) };
+}
+
 /** Precompute deterministic per-loan figures (principal, payment, payment window) once. */
 function precomputeLoans(blocks) {
   return blocks.filter(b => b.kind === 'loan').map(b => ({
@@ -103,13 +177,19 @@ function precomputeLoans(blocks) {
 }
 
 class ParticleState {
-  constructor(accountBalances, blockAmounts, effectiveRatesByYear) {
+  constructor(accountBalances, blockAmounts, effectiveRatesByYear, marketEventOccurrences = [], costBasis = {}, netWorthHistory = []) {
     this.accountBalances = accountBalances; // {id: number}
     this.blockAmounts = blockAmounts;       // shared reference, immutable
     this.effectiveRatesByYear = effectiveRatesByYear; // shared reference, immutable
+    this.marketEventOccurrences = marketEventOccurrences; // sampled once per path
+    this.costBasis = costBasis; // {id: number} — tracked for 'taxable' accounts when capital-gains modeling is enabled
+    this.netWorthHistory = netWorthHistory;
+    this.hasShortfall = false;
   }
   clone() {
-    return new ParticleState({ ...this.accountBalances }, this.blockAmounts, this.effectiveRatesByYear);
+    const clone = new ParticleState({ ...this.accountBalances }, this.blockAmounts, this.effectiveRatesByYear, this.marketEventOccurrences, { ...this.costBasis }, [...this.netWorthHistory]);
+    clone.hasShortfall = this.hasShortfall;
+    return clone;
   }
   total() {
     return Object.values(this.accountBalances).reduce((s, v) => s + v, 0);
@@ -120,7 +200,8 @@ export class Simulator {
   constructor({
     startDate, months, accounts, blocks, globalReturnsSchedule,
     city = 'Default', numParticles = 300, useParticleFilter = true,
-    retirementMonthIndex = null,
+    retirementMonthIndex = null, marketEvents = [],
+    inflationRate = 0, capitalGains = null, withdrawalOrder = [],
   }) {
     this.startDate = parseFlexibleDate(startDate);
     this.months = months;
@@ -131,6 +212,22 @@ export class Simulator {
     this.numParticles = numParticles;
     this.useParticleFilter = useParticleFilter;
     this.retirementMonthIndex = retirementMonthIndex;
+    this.marketEvents = marketEvents.map(event => createMarketEvent(event));
+    // Global annual inflation rate (fraction, e.g. 0.03). Escalates the nominal
+    // amount of any block with `inflationAdjusted !== false` over time.
+    this.inflationRate = Number(inflationRate) || 0;
+    // Optional, simplified capital-gains tax on taxable-brokerage withdrawals.
+    // Off by default — a planning simplification (flat rate, no long/short-term
+    // distinction, assumes the account's starting balance is 100% cost basis).
+    this.capitalGains = capitalGains?.enabled
+      ? { enabled: true, rate: Math.max(0, Number(capitalGains.rate) || 0) }
+      : { enabled: false, rate: 0 };
+    // User-configured retirement drawdown order (account ids, non-debt only).
+    // Falls back to a sensible type-based cascade for any account not listed
+    // (see DRAWDOWN_PRIORITY / drawFromAccounts above).
+    this.withdrawalOrder = Array.isArray(withdrawalOrder)
+      ? withdrawalOrder.filter(id => accounts[id] && accounts[id].type !== 'debt')
+      : [];
   }
 
   _returnsScheduleFor(account) {
@@ -141,16 +238,30 @@ export class Simulator {
     const { startDate, months, accounts, blocks, city } = this;
     const defaultChecking = firstAccountOfType(accounts, 'checking');
     const loans = precomputeLoans(blocks);
+    const eventTriggerCounts = Object.fromEntries(this.marketEvents.map(event => [event.id, 0]));
+    const eventStartCounts = Object.fromEntries(this.marketEvents.map(event => [event.id, {}]));
 
     // 1) Build N independent particles, each with its own noise draws for
     //    block amounts and its own resulting effective tax rates by year.
     let particles = [];
     for (let i = 0; i < this.numParticles; i++) {
-      const blockAmounts = precomputeBlockAmounts(blocks, startDate, months);
+      const blockAmounts = precomputeBlockAmounts(blocks, startDate, months, this.inflationRate);
       const effectiveRatesByYear = computeEffectiveRatesByYear(blocks, accounts, blockAmounts, startDate, months, city);
       const balances = {};
-      for (const [id, acc] of Object.entries(accounts)) balances[id] = acc.balance;
-      particles.push(new ParticleState(balances, blockAmounts, effectiveRatesByYear));
+      const costBasis = {};
+      for (const [id, acc] of Object.entries(accounts)) {
+        balances[id] = acc.balance;
+        // Simplifying assumption: the starting balance of a taxable account is
+        // treated as 100% cost basis (no embedded unrealized gain at t=0).
+        costBasis[id] = acc.type === 'taxable' ? acc.balance : 0;
+      }
+      const marketEventOccurrences = sampleMarketEvents(this.marketEvents, months);
+      for (const occurrence of marketEventOccurrences) {
+        eventTriggerCounts[occurrence.eventId]++;
+        const starts = eventStartCounts[occurrence.eventId];
+        starts[occurrence.startIndex] = (starts[occurrence.startIndex] || 0) + 1;
+      }
+      particles.push(new ParticleState(balances, blockAmounts, effectiveRatesByYear, marketEventOccurrences, costBasis));
     }
 
     const pf = new ParticleFilter(particles, { enabled: this.useParticleFilter, essThresholdFraction: 0.5, resamplePenalty: 0.02 });
@@ -170,13 +281,17 @@ export class Simulator {
       for (const p of pf.particles) {
         // --- apply returns to every account ---
         for (const [id, acc] of Object.entries(accounts)) {
-          const sched = this._returnsScheduleFor(acc).getFor(date);
+          const event = activeMarketEvent(this.marketEvents, p.marketEventOccurrences, m, acc);
+          const sched = event
+            ? { annual: event.annualReturn, sigma: event.sigma }
+            : this._returnsScheduleFor(acc).getFor(date);
           const schedSigmaMonthly = (sched.sigma || 0) / Math.sqrt(12);
           const extraSigma = acc.sigma || 0;
           const totalSigma = Math.sqrt(schedSigmaMonthly ** 2 + extraSigma ** 2);
           const mu = sched.annual / 12;
           const noise = randNormal(mu, totalSigma);
           p.accountBalances[id] *= (1 + noise);
+          if (acc.type !== 'debt') p.accountBalances[id] = Math.max(0, p.accountBalances[id]);
         }
 
         // --- apply blocks active this month ---
@@ -195,15 +310,17 @@ export class Simulator {
               credited = amt * (1 - rate);
             }
             p.accountBalances[targetId] += credited;
+            // New principal contributed to a taxable account is cost basis, not gain.
+            if (targetAcc && targetAcc.type === 'taxable') p.costBasis[targetId] = (p.costBasis[targetId] || 0) + credited;
           } else {
             // expense
             const sourceId = b.sourceAccountId && accounts[b.sourceAccountId] ? b.sourceAccountId : defaultChecking?.id;
-            if (sourceId) p.accountBalances[sourceId] -= amt;
+            const draw = drawFromAccounts(p.accountBalances, accounts, amt, sourceId, { withdrawalOrder: this.withdrawalOrder, costBasis: p.costBasis, capitalGains: this.capitalGains });
+            if (draw.shortfall > 0) p.hasShortfall = true;
 
             // optional: expense also functions as a debt payment
             if (b.debtAccountId && accounts[b.debtAccountId]) {
-              const debtAcc = accounts[b.debtAccountId];
-              const paidDown = Math.min(amt, -p.accountBalances[b.debtAccountId]); // don't overpay past zero
+              const paidDown = Math.min(draw.withdrawn, -p.accountBalances[b.debtAccountId]); // don't overpay past zero
               p.accountBalances[b.debtAccountId] += Math.max(0, paidDown);
             }
           }
@@ -216,12 +333,14 @@ export class Simulator {
 
           if (key === block.startMonth) {
             if (accounts[block.debtAccountId]) p.accountBalances[block.debtAccountId] -= principal; // loan originated
-            if (sourceId) p.accountBalances[sourceId] -= downPayment;
+            const draw = drawFromAccounts(p.accountBalances, accounts, downPayment, sourceId, { withdrawalOrder: this.withdrawalOrder, costBasis: p.costBasis, capitalGains: this.capitalGains });
+            if (draw.shortfall > 0) p.hasShortfall = true;
           }
           if (key >= window[0] && key <= window[1]) {
-            if (sourceId) p.accountBalances[sourceId] -= payment;
+            const draw = drawFromAccounts(p.accountBalances, accounts, payment, sourceId, { withdrawalOrder: this.withdrawalOrder, costBasis: p.costBasis, capitalGains: this.capitalGains });
+            if (draw.shortfall > 0) p.hasShortfall = true;
             if (accounts[block.debtAccountId]) {
-              const paidDown = Math.min(payment, -p.accountBalances[block.debtAccountId]); // don't overpay past zero
+              const paidDown = Math.min(draw.withdrawn, -p.accountBalances[block.debtAccountId]); // don't overpay past zero
               p.accountBalances[block.debtAccountId] += Math.max(0, paidDown);
             }
           }
@@ -229,6 +348,7 @@ export class Simulator {
       }
 
       // --- collect stats for this month across the ensemble ---
+      for (const particle of pf.particles) particle.netWorthHistory.push(particle.total());
       const totals = pf.particles.map(p => p.total()).sort((a, b) => a - b);
       const mean = totals.reduce((a, b) => a + b, 0) / totals.length;
       timeline.push({ p10: percentile(totals, 0.10), p50: percentile(totals, 0.50), p90: percentile(totals, 0.90), mean });
@@ -251,18 +371,22 @@ export class Simulator {
       }
 
       // --- particle-filter weighting + resampling ---
-      pf.updateWeights(p => p.total());
+      pf.updateWeights(p => p.hasShortfall ? -1 : p.total());
       const resampled = pf.maybeResample(p => p.clone());
       if (resampled) resampleEvents++;
     }
 
     const finalTotals = pf.particles.map(p => p.total());
-    const bankruptCount = finalTotals.filter(v => v < 0).length;
+    const bankruptCount = pf.particles.filter((p, index) => p.hasShortfall || finalTotals[index] < 0).length;
     const solvencyRate = 1 - bankruptCount / finalTotals.length;
 
     const fireStats = fireSuccessRate != null
       ? { fireNumber, successRate: fireSuccessRate, retirementMonthIndex: this.retirementMonthIndex }
       : null;
+    const traceLimit = Math.min(50, pf.particles.length);
+    const traceStep = pf.particles.length / Math.max(1, traceLimit);
+    const individualTraces = Array.from({ length: traceLimit }, (_, index) =>
+      [...pf.particles[Math.min(pf.particles.length - 1, Math.floor(index * traceStep))].netWorthHistory]);
 
     return {
       timeline,
@@ -271,19 +395,35 @@ export class Simulator {
       solvencyRate,
       resampleEvents,
       fireStats,
+      marketEventStats: this.marketEvents.map(event => ({
+        id: event.id,
+        name: event.name,
+        configuredProbability: event.probability,
+        triggeredPaths: eventTriggerCounts[event.id],
+        triggerRate: eventTriggerCounts[event.id] / this.numParticles,
+        triggerMonths: Object.entries(eventStartCounts[event.id]).map(([monthIndex, count]) => ({
+          monthIndex: Number(monthIndex),
+          paths: count,
+          rate: count / this.numParticles,
+        })),
+      })),
+      individualTraces,
       finalParticles: pf.particles,
     };
   }
 
-  /** 25x the nominal annual continuous-expense run-rate active at month `m` (excludes debt/loan paydowns). */
+  /** 25x the nominal (inflation-escalated) annual continuous-expense run-rate active at month `m` (excludes debt/loan paydowns). */
   _fireNumberAt(m) {
     const date = monthIndex(this.startDate, m);
+    const inflationFactor = Math.pow(1 + this.inflationRate, m / 12);
     let annualExpense = 0;
     for (const b of this.blocks) {
       if (b.category !== 'expense' || b.kind !== 'continuous') continue;
       if (b.debtAccountId) continue; // debt payments aren't "living expenses"
       if (!blockActiveInMonth(b, date)) continue;
-      annualExpense += nominalMonthlyAmount(b, date) * 12;
+      let annual = nominalMonthlyAmount(b, date) * 12;
+      if (b.inflationAdjusted !== false) annual *= inflationFactor;
+      annualExpense += annual;
     }
     return annualExpense * 25;
   }

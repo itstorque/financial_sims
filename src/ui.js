@@ -9,9 +9,10 @@ import { createBlock, createLoanBlock, AmountSchedule, buildScheduleClips, splic
 import { ReturnsSchedule } from './returnsSchedule.js';
 import { cities } from './taxes.js';
 import { maxHomePrice } from './affordability.js';
-import { createScenarioExport, saveAutosave, loadAutosave, clearAutosave, listScenarios, saveScenario, loadScenario, deleteScenario } from './persistence.js';
+import { createScenarioExport, reviveScenarioExport, saveAutosave, loadAutosave, clearAutosave } from './persistence.js';
 import { buildBaseScenario } from './baseScenario.js';
 import { loadMeScenario } from './meScenario.js';
+import { createMarketEvent } from './marketEvents.js';
 
 function todayMonth() {
   const d = new Date();
@@ -58,6 +59,10 @@ function gatherSettings() {
     city: document.getElementById('citySelect').value,
     numParticles: document.getElementById('numParticles').value,
     useParticleFilter: document.getElementById('useParticleFilter').checked,
+    inflationRate: document.getElementById('inflationRate').value,
+    realDollars: document.getElementById('realDollars').checked,
+    capGainsEnabled: document.getElementById('capGainsEnabled').checked,
+    capGainsRate: document.getElementById('capGainsRate').value,
   };
 }
 
@@ -68,6 +73,10 @@ function applySettings(settings) {
   if (settings.city != null) document.getElementById('citySelect').value = settings.city;
   if (settings.numParticles != null) document.getElementById('numParticles').value = settings.numParticles;
   if (settings.useParticleFilter != null) document.getElementById('useParticleFilter').checked = settings.useParticleFilter;
+  if (settings.inflationRate != null) document.getElementById('inflationRate').value = settings.inflationRate;
+  if (settings.realDollars != null) document.getElementById('realDollars').checked = settings.realDollars;
+  if (settings.capGainsEnabled != null) document.getElementById('capGainsEnabled').checked = settings.capGainsEnabled;
+  if (settings.capGainsRate != null) document.getElementById('capGainsRate').value = settings.capGainsRate;
 }
 
 function seedDefaultBlocksIfEmpty(state) {
@@ -83,12 +92,14 @@ export async function initUI(state) {
   const accountsDiv = document.getElementById('accounts');
   const blocksDiv = document.getElementById('blocks');
   const segmentsDiv = document.getElementById('returnsSegments');
+  const marketEventsDiv = document.getElementById('marketEvents');
+  const withdrawalOrderDiv = document.getElementById('withdrawalOrderList');
   const citySelect = document.getElementById('citySelect');
   const defaultAnnualInput = document.getElementById('defaultAnnual');
   const defaultSigmaInput = document.getElementById('defaultSigma');
   const scenarioNameInput = document.getElementById('scenarioName');
   const scenarioNotesInput = document.getElementById('scenarioNotes');
-  const scenarioSelect = document.getElementById('scenarioSelect');
+  const scenarioFileInput = document.getElementById('scenarioFile');
   const scenarioStatus = document.getElementById('scenarioStatus');
   const blockEditor = document.getElementById('blockEditor');
   const editorBlockList = document.getElementById('editorBlockList');
@@ -108,24 +119,22 @@ export async function initUI(state) {
   const meScenario = await loadMeScenario();
   const base = meScenario || buildBaseScenario();
 
-  // Make the base/personal scenario always available as a named scenario
-  // (without clobbering it if the user has since edited that saved copy).
-  if (!listScenarios().includes(base.name)) {
-    saveScenario(base.name, base.settings, base.state, base.notes);
-  }
-
   // Restore the last working session (if any) before falling back to the base scenario.
   const auto = loadAutosave();
   if (auto) {
     state.accounts = auto.state.accounts;
     state.blocks = auto.state.blocks;
     state.globalReturnsSchedule = auto.state.globalReturnsSchedule;
+    state.marketEvents = auto.state.marketEvents || [];
+    state.withdrawalOrder = auto.state.withdrawalOrder || [];
     applySettings(auto.settings);
     scenarioNotesInput.value = auto.notes || '';
   } else {
     state.accounts = base.state.accounts;
     state.blocks = base.state.blocks;
     state.globalReturnsSchedule = base.state.globalReturnsSchedule;
+    state.marketEvents = base.state.marketEvents || [];
+    state.withdrawalOrder = base.state.withdrawalOrder || [];
     applySettings(base.settings);
     scenarioNotesInput.value = base.notes;
     scenarioNameInput.value = base.name;
@@ -240,9 +249,33 @@ export async function initUI(state) {
     const totalMonths = Math.max(1, keyToIdx(clips.at(-1).to) - keyToIdx(clips[0].from) + 1);
     const pixelsPerMonth = 8;
     const timelineWidth = totalMonths * pixelsPerMonth;
+    let elapsedMonths = 0;
+    const events = [];
     const timeline = clips.map((clip, index) => {
       const months = keyToIdx(clip.to) - keyToIdx(clip.from) + 1;
       const width = months * pixelsPerMonth;
+      const previous = clips[index - 1];
+      const next = clips[index + 1];
+      const isPaused = clip.annualAmount === 0;
+      if (isPaused) {
+        if (!previous && next) {
+          events.push(`<button class="timeline-event timeline-event--start" style="left:${(elapsedMonths + months) * pixelsPerMonth}px" data-clip-index="${index + 1}" type="button" title="Start: ${next.from}"><strong>Start</strong><time>${next.from}</time></button>`);
+        } else if (previous && !next) {
+          events.push(`<button class="timeline-event timeline-event--end" style="left:${elapsedMonths * pixelsPerMonth}px" data-clip-index="${index - 1}" type="button" title="End: ${previous.to}"><strong>End</strong><time>${previous.to}</time></button>`);
+        } else if (previous && next) {
+          events.push(`<button class="timeline-event timeline-event--pause" style="left:${elapsedMonths * pixelsPerMonth}px" data-clip-index="${index}" type="button" title="Pause: ${clip.from}"><strong>Pause</strong><time>${clip.from}</time></button>`);
+          events.push(`<button class="timeline-event timeline-event--start" style="left:${(elapsedMonths + months) * pixelsPerMonth}px" data-clip-index="${index + 1}" type="button" title="Start: ${next.from}"><strong>Start</strong><time>${next.from}</time></button>`);
+        }
+        elapsedMonths += months;
+        return `<button class="clip-gap ${index === editorState.clipIndex ? 'selected' : ''}" style="width:${width}px" data-clip-index="${index}" type="button" aria-label="No amount from ${clip.from} to ${clip.to}" title="No amount: ${clip.from} to ${clip.to}"></button>`;
+      }
+      if (!previous) {
+        events.push(`<button class="timeline-event timeline-event--start timeline-event--edge-start" style="left:${elapsedMonths * pixelsPerMonth}px" data-clip-index="${index}" type="button" title="Start: ${clip.from}"><strong>Start</strong><time>${clip.from}</time></button>`);
+      }
+      if (!next) {
+        events.push(`<button class="timeline-event timeline-event--end timeline-event--edge-end" style="left:${(elapsedMonths + months) * pixelsPerMonth}px" data-clip-index="${index}" type="button" title="End: ${clip.to}"><strong>End</strong><time>${clip.to}</time></button>`);
+      }
+      elapsedMonths += months;
       return `<button class="clip ${index === editorState.clipIndex ? 'selected' : ''} clip-color-${index % 5}" style="width:${width}px" data-clip-index="${index}" type="button" title="${escapeHtml(clip.name)}: ${clip.from} to ${clip.to}">
         <strong>${escapeHtml(clip.name)}</strong>
         <span class="clip-dates"><span><b>From</b><time>${clip.from}</time></span><span><b>To</b><time>${clip.to}</time></span></span>
@@ -257,9 +290,9 @@ export async function initUI(state) {
         <button id="useSimpleAmount" class="secondary" type="button">Use simple amount</button>
       </div>
       <section class="timeline-studio" aria-label="Amount schedule timeline">
-        <div class="timeline-toolbar"><div><strong>Schedule clips</strong><p>Select a clip to edit or split it into two periods. Scroll horizontally to view the full timeline.</p></div><span>${clips[0]?.from} → ${clips.at(-1)?.to}</span></div>
+        <div class="timeline-toolbar"><div><strong>Schedule clips</strong><p>Start, Pause, and End markers represent $0 periods. Select any clip or marker to edit it.</p></div><span>${clips[0]?.from} → ${clips.at(-1)?.to}</span></div>
         <div class="timeline-scroll">
-          <div class="clip-track" style="width:${timelineWidth}px">${timeline}</div>
+          <div class="clip-track" style="width:${timelineWidth}px"><div class="timeline-events">${events.join('')}</div><div class="clip-segments">${timeline}</div></div>
           <div class="timeline-ruler" style="width:${timelineWidth}px"><span>${clips[0]?.from}</span><span>simulation timeline</span><span>${clips.at(-1)?.to}</span></div>
         </div>
       </section>
@@ -271,6 +304,7 @@ export async function initUI(state) {
           ${isIncome
             ? `<label>Target account <select id="clipFlowAccount">${accountOptions(block.targetAccountId, account => account.type !== 'debt')}</select></label><label class="editor-check"><input id="clipFlowPretax" type="checkbox" ${block.preTax ? 'checked' : ''}/> Pre-tax income</label>`
             : `<label>Paid from <select id="clipFlowAccount">${accountOptions(block.sourceAccountId, account => account.type !== 'debt')}</select></label><label>Pay down debt <select id="clipFlowDebt">${accountOptions(block.debtAccountId, account => account.type === 'debt')}</select></label>`}
+          <label class="editor-check"><input id="clipFlowInflation" type="checkbox" ${block.inflationAdjusted !== false ? 'checked' : ''}/> Escalate with inflation</label>
         </div>
       </section>
       ${selected ? `
@@ -286,7 +320,7 @@ export async function initUI(state) {
           <div><strong>Splice clip</strong><p>Create a new clip beginning at this month. Both sides keep the current settings until edited.</p></div>
           <label>Cut at <input id="spliceMonth" type="month" min="${nextMonthKey(selected.from)}" max="${selected.to}" value="${splitDefault}" ${selected.from === selected.to ? 'disabled' : ''}/></label>
           <button id="spliceClip" type="button" ${selected.from === selected.to ? 'disabled' : ''}>✂ Splice</button>
-          <button id="pauseClip" class="secondary" type="button">Set to $0</button>
+          <button id="pauseClip" class="secondary" type="button">Pause</button>
         </div>
       </section>` : ''}`;
 
@@ -311,6 +345,7 @@ export async function initUI(state) {
     document.getElementById('clipFlowAccount').addEventListener('change', event => { if (isIncome) block.targetAccountId = event.target.value || null; else block.sourceAccountId = event.target.value || null; });
     document.getElementById('clipFlowPretax')?.addEventListener('change', event => { block.preTax = event.target.checked; });
     document.getElementById('clipFlowDebt')?.addEventListener('change', event => { block.debtAccountId = event.target.value || null; });
+    document.getElementById('clipFlowInflation').addEventListener('change', event => { block.inflationAdjusted = event.target.checked; });
     if (!selected) return;
     document.getElementById('clipName').addEventListener('change', event => { selected.name = event.target.value.trim() || `Clip ${editorState.clipIndex + 1}`; renderBlockEditor(); });
     document.getElementById('clipAmount').addEventListener('change', event => { selected.annualAmount = parseFloat(event.target.value || 0); renderBlockEditor(); });
@@ -338,6 +373,7 @@ export async function initUI(state) {
           ${isIncome
             ? `<label>Target account <select id="editBlockAccount">${accountOptions(block.targetAccountId, account => account.type !== 'debt')}</select></label><label class="editor-check"><input id="editBlockPretax" type="checkbox" ${block.preTax ? 'checked' : ''}/> Pre-tax income</label>`
             : `<label>Paid from <select id="editBlockAccount">${accountOptions(block.sourceAccountId, account => account.type !== 'debt')}</select></label><label>Pay down debt <select id="editBlockDebt">${accountOptions(block.debtAccountId, account => account.type === 'debt')}</select></label>`}
+          <label class="editor-check"><input id="editBlockInflation" type="checkbox" ${block.inflationAdjusted !== false ? 'checked' : ''}/> Escalate with inflation</label>
         </div>
       </section>
       ${block.kind === 'continuous' ? `<section class="schedule-choice"><div><strong>${block.useCustomSchedule ? 'Clip schedule enabled' : 'Simple recurring amount'}</strong><p>${block.useCustomSchedule ? 'Edit named periods on the timeline below.' : 'Turn this into a timeline to vary it throughout the simulation.'}</p></div><button id="toggleClipSchedule" class="${block.useCustomSchedule ? 'secondary' : ''}" type="button">${block.useCustomSchedule ? 'Open clips' : 'Create clip timeline'}</button></section>` : ''}`;
@@ -350,6 +386,7 @@ export async function initUI(state) {
     document.getElementById('editBlockAccount').addEventListener('change', event => { if (isIncome) block.targetAccountId = event.target.value || null; else block.sourceAccountId = event.target.value || null; });
     document.getElementById('editBlockPretax')?.addEventListener('change', event => { block.preTax = event.target.checked; });
     document.getElementById('editBlockDebt')?.addEventListener('change', event => { block.debtAccountId = event.target.value || null; });
+    document.getElementById('editBlockInflation').addEventListener('change', event => { block.inflationAdjusted = event.target.checked; });
     if (block.kind !== 'continuous') return;
     document.getElementById('toggleClipSchedule').addEventListener('click', () => {
       if (!block.useCustomSchedule) canonicalizeBlockSchedule(block);
@@ -420,6 +457,58 @@ export async function initUI(state) {
     renderGlobalSegments();
   });
 
+  function renderMarketEvents() {
+    marketEventsDiv.innerHTML = '';
+    if (!state.marketEvents.length) {
+      marketEventsDiv.innerHTML = '<div class="empty-inline">No rare events configured. Normal return volatility still applies.</div>';
+      return;
+    }
+    state.marketEvents.forEach((event, index) => {
+      const card = document.createElement('div');
+      card.className = 'market-event';
+      card.innerHTML = `
+        <div class="card-header">
+          <div class="card-title"><strong>${escapeHtml(event.name)}</strong><span>${pct(event.probability)}% chance · next ${event.triggerWindowMonths} months · ${event.durationMonths} month duration</span></div>
+          <button class="remove event-remove" type="button">Remove</button>
+        </div>
+        <div class="event-grid">
+          <label>Event name <input class="event-name" value="${escapeHtml(event.name)}"/></label>
+          <label>Probability % <input class="event-probability" type="number" min="0" max="100" step="0.1" value="${pct(event.probability)}"/></label>
+          <label>Can begin within next (months) <input class="event-window" type="number" min="1" step="1" value="${event.triggerWindowMonths}"/></label>
+          <label>Duration (months) <input class="event-duration" type="number" min="1" step="1" value="${event.durationMonths}"/></label>
+          <label>Annual return during event % <input class="event-return" type="number" step="0.1" value="${pct(event.annualReturn)}"/></label>
+          <label>Volatility σ % <input class="event-sigma" type="number" min="0" step="0.1" value="${pct(event.sigma)}"/></label>
+          <label>Applies to <select class="event-scope"><option value="investments" ${event.scope === 'investments' ? 'selected' : ''}>Investment accounts</option><option value="all" ${event.scope === 'all' ? 'selected' : ''}>All non-debt accounts</option></select></label>
+        </div>`;
+      marketEventsDiv.appendChild(card);
+      const updateSummary = () => {
+        card.querySelector('.card-title strong').textContent = event.name;
+        card.querySelector('.card-title span').textContent = `${pct(event.probability)}% chance · next ${event.triggerWindowMonths} months · ${event.durationMonths} month duration`;
+      };
+      card.querySelector('.event-name').addEventListener('input', e => { event.name = e.target.value; updateSummary(); });
+      card.querySelector('.event-probability').addEventListener('input', e => { event.probability = Math.min(1, Math.max(0, parseFloat(e.target.value || 0) / 100)); updateSummary(); });
+      card.querySelector('.event-window').addEventListener('input', e => { event.triggerWindowMonths = Math.max(1, Math.round(parseFloat(e.target.value || 1))); updateSummary(); });
+      card.querySelector('.event-duration').addEventListener('input', e => { event.durationMonths = Math.max(1, Math.round(parseFloat(e.target.value || 1))); updateSummary(); });
+      card.querySelector('.event-return').addEventListener('input', e => { event.annualReturn = parseFloat(e.target.value || 0) / 100; });
+      card.querySelector('.event-sigma').addEventListener('input', e => { event.sigma = Math.max(0, parseFloat(e.target.value || 0) / 100); });
+      card.querySelector('.event-scope').addEventListener('change', e => { event.scope = e.target.value; });
+      card.querySelector('.event-remove').addEventListener('click', () => { state.marketEvents.splice(index, 1); renderMarketEvents(); });
+    });
+  }
+
+  document.getElementById('addMarketEvent').addEventListener('click', () => {
+    state.marketEvents.push(createMarketEvent({
+      name: 'AI bubble / geopolitical crash',
+      probability: 0.15,
+      triggerWindowMonths: 24,
+      durationMonths: 12,
+      annualReturn: -0.35,
+      sigma: 0.25,
+      scope: 'investments',
+    }));
+    renderMarketEvents();
+  });
+
   function renderNavAccounts() {
     const navAccounts = document.getElementById('navAccounts');
     navAccounts.innerHTML = Object.values(state.accounts).map(acc => `
@@ -427,6 +516,44 @@ export async function initUI(state) {
         <span class="nav-account-name">${escapeHtml(acc.name)}</span>
         <span class="nav-account-value">${formatCompactMoney(acc.balance)}</span>
       </div>`).join('');
+  }
+
+  /** Keeps `state.withdrawalOrder` in sync with the current non-debt accounts
+   *  (auto-appending newly added accounts, dropping removed ones) and renders
+   *  the reorderable "Retirement Withdrawal Order" list. */
+  function renderWithdrawalOrder() {
+    const eligibleIds = Object.values(state.accounts).filter(a => a.type !== 'debt').map(a => a.id);
+    state.withdrawalOrder = (state.withdrawalOrder || []).filter(id => eligibleIds.includes(id));
+    for (const id of eligibleIds) if (!state.withdrawalOrder.includes(id)) state.withdrawalOrder.push(id);
+
+    withdrawalOrderDiv.innerHTML = '';
+    if (state.withdrawalOrder.length === 0) {
+      withdrawalOrderDiv.innerHTML = '<div class="empty-inline">Add a non-debt account to configure a withdrawal order.</div>';
+      return;
+    }
+    state.withdrawalOrder.forEach((id, index) => {
+      const acc = state.accounts[id];
+      if (!acc) return;
+      const row = document.createElement('div'); row.className = 'withdrawal-order-row';
+      row.innerHTML = `
+        <span class="withdrawal-order-index">${index + 1}</span>
+        <span class="withdrawal-order-name">${escapeHtml(acc.name)}<small>${ACCOUNT_TYPE_LABELS[acc.type]}</small></span>
+        <div class="withdrawal-order-actions">
+          <button class="secondary wo-up" type="button" ${index === 0 ? 'disabled' : ''} aria-label="Move ${escapeHtml(acc.name)} up">\u2191</button>
+          <button class="secondary wo-down" type="button" ${index === state.withdrawalOrder.length - 1 ? 'disabled' : ''} aria-label="Move ${escapeHtml(acc.name)} down">\u2193</button>
+        </div>`;
+      withdrawalOrderDiv.appendChild(row);
+      row.querySelector('.wo-up').addEventListener('click', () => {
+        if (index === 0) return;
+        [state.withdrawalOrder[index - 1], state.withdrawalOrder[index]] = [state.withdrawalOrder[index], state.withdrawalOrder[index - 1]];
+        renderWithdrawalOrder();
+      });
+      row.querySelector('.wo-down').addEventListener('click', () => {
+        if (index === state.withdrawalOrder.length - 1) return;
+        [state.withdrawalOrder[index + 1], state.withdrawalOrder[index]] = [state.withdrawalOrder[index], state.withdrawalOrder[index + 1]];
+        renderWithdrawalOrder();
+      });
+    });
   }
 
   function renderAccounts(expandedId = null) {
@@ -475,7 +602,7 @@ export async function initUI(state) {
         editButton.setAttribute('aria-expanded', String(willExpand));
       });
       el.querySelector('.remove').addEventListener('click', () => { delete state.accounts[acc.id]; renderAccounts(); renderBlocks(); });
-      el.querySelector('.acc-name').addEventListener('input', e => { acc.name = e.target.value; el.querySelector('strong').textContent = acc.name; renderNavAccounts(); renderBlocks(); });
+      el.querySelector('.acc-name').addEventListener('input', e => { acc.name = e.target.value; el.querySelector('strong').textContent = acc.name; renderNavAccounts(); renderBlocks(); renderWithdrawalOrder(); });
       el.querySelector('.acc-type').addEventListener('change', e => { acc.type = e.target.value; renderAccounts(acc.id); renderBlocks(); });
       el.querySelector('.acc-balance').addEventListener('input', e => {
         acc.balance = parseFloat(e.target.value || 0);
@@ -499,6 +626,7 @@ export async function initUI(state) {
     }
 
     renderNavAccounts();
+    renderWithdrawalOrder();
   }
 
   /** Renders a horizontal "axis" showing each amount-schedule segment as a proportionally-sized bar, with gaps shown as $0. */
@@ -802,15 +930,12 @@ export async function initUI(state) {
       <div>Total monthly carrying cost (PITI+HOA): $${Math.round(res.monthlyCarrying).toLocaleString()}</div>`;
   });
 
-  function refreshScenarioOptions(selectName) {
-    scenarioSelect.innerHTML = '<option value="">Saved scenarios</option>' +
-      listScenarios().map(name => `<option value="${name}" ${name === selectName ? 'selected' : ''}>${name}</option>`).join('');
-  }
-
   function loadStateAndSettings(data) {
     state.accounts = data.state.accounts;
     state.blocks = data.state.blocks;
     state.globalReturnsSchedule = data.state.globalReturnsSchedule;
+    state.marketEvents = data.state.marketEvents || [];
+    state.withdrawalOrder = data.state.withdrawalOrder || [];
     applySettings(data.settings);
     scenarioNotesInput.value = data.notes || '';
     defaultAnnualInput.value = pct(state.globalReturnsSchedule.defaultAnnual);
@@ -818,18 +943,18 @@ export async function initUI(state) {
     renderAccounts();
     renderBlocks();
     renderGlobalSegments();
+    renderMarketEvents();
   }
 
-  document.getElementById('saveScenario').addEventListener('click', () => {
-    const name = scenarioNameInput.value.trim();
-    if (!name) { scenarioStatus.textContent = 'Enter a name first.'; return; }
-    saveScenario(name, gatherSettings(), state, scenarioNotesInput.value);
-    refreshScenarioOptions(name);
-    scenarioStatus.textContent = `Saved "${name}".`;
-  });
+  function applyImportedScenario(data, sourceLabel) {
+    loadStateAndSettings(data);
+    scenarioNameInput.value = data.name;
+    saveAutosave(gatherSettings(), state, scenarioNotesInput.value);
+    scenarioStatus.textContent = `Loaded "${sourceLabel}".`;
+  }
 
   document.getElementById('exportScenario').addEventListener('click', () => {
-    const name = scenarioNameInput.value.trim() || scenarioSelect.value || 'Untitled scenario';
+    const name = scenarioNameInput.value.trim() || 'Untitled scenario';
     const payload = createScenarioExport(name, gatherSettings(), state, scenarioNotesInput.value);
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -844,21 +969,31 @@ export async function initUI(state) {
   });
 
   document.getElementById('loadScenario').addEventListener('click', () => {
-    const name = scenarioSelect.value;
-    if (!name) { scenarioStatus.textContent = 'Pick a scenario to load.'; return; }
-    const data = loadScenario(name);
-    if (!data) { scenarioStatus.textContent = `Could not find "${name}".`; return; }
-    loadStateAndSettings(data);
-    scenarioNameInput.value = name;
-    scenarioStatus.textContent = `Loaded "${name}".`;
+    scenarioFileInput.click();
   });
 
-  document.getElementById('deleteScenario').addEventListener('click', () => {
-    const name = scenarioSelect.value;
-    if (!name) { scenarioStatus.textContent = 'Pick a scenario to delete.'; return; }
-    deleteScenario(name);
-    refreshScenarioOptions();
-    scenarioStatus.textContent = `Deleted "${name}".`;
+  scenarioFileInput.addEventListener('change', async () => {
+    const file = scenarioFileInput.files?.[0];
+    if (!file) return;
+    try {
+      const data = reviveScenarioExport(JSON.parse(await file.text()));
+      applyImportedScenario(data, file.name);
+    } catch (error) {
+      scenarioStatus.textContent = error instanceof SyntaxError ? 'The selected file is not valid JSON.' : error.message;
+    } finally {
+      scenarioFileInput.value = '';
+    }
+  });
+
+  document.getElementById('loadExampleScenario').addEventListener('click', async () => {
+    scenarioStatus.textContent = 'Loading me.example.json…';
+    try {
+      const response = await fetch('./me.example.json', { cache: 'no-store' });
+      if (!response.ok) throw new Error(`Could not load me.example.json (${response.status}).`);
+      applyImportedScenario(reviveScenarioExport(await response.json()), 'me.example.json');
+    } catch (error) {
+      scenarioStatus.textContent = error instanceof SyntaxError ? 'me.example.json is not valid JSON.' : error.message;
+    }
   });
 
   document.getElementById('resetToBase').addEventListener('click', () => {
@@ -867,16 +1002,15 @@ export async function initUI(state) {
     // for "my starting balances look stale" — the autosaved session always
     // takes priority over the base scenario, so updates to the base/me.json
     // numbers are otherwise invisible once a session has been autosaved.
-    if (!confirm('Discard your current working session and reload the base scenario? This clears the autosave (named scenarios are unaffected).')) return;
+    if (!confirm('Discard your current working session and reload the base scenario?')) return;
     clearAutosave();
     location.reload();
   });
 
-  refreshScenarioOptions();
-
   renderAccounts();
   renderBlocks();
   renderGlobalSegments();
+  renderMarketEvents();
 
   // Continuously autosave the working session (debounced) so a page reload
   // doesn't lose in-progress edits, independent of the explicit named scenarios.

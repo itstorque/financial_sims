@@ -4,6 +4,7 @@
 import { Account } from './accounts.js';
 import { ReturnsSchedule } from './returnsSchedule.js';
 import { createBlock, createLoanBlock } from './blocks.js';
+import { createMarketEvent } from './marketEvents.js';
 
 const AUTOSAVE_KEY = 'finSim.autosave.v1';
 const SCENARIOS_KEY = 'finSim.scenarios.v1';
@@ -29,6 +30,8 @@ export function serializeState(state) {
     })),
     blocks: state.blocks.map(b => ({ ...b })),
     globalReturnsSchedule: serializeReturnsSchedule(state.globalReturnsSchedule),
+    marketEvents: (state.marketEvents || []).map(event => ({ ...event })),
+    withdrawalOrder: Array.isArray(state.withdrawalOrder) ? [...state.withdrawalOrder] : [],
   };
 }
 
@@ -45,6 +48,21 @@ export function createScenarioExport(name, settings, state, notes = '') {
   };
 }
 
+/** Validate and revive a portable scenario JSON object loaded from disk. */
+export function reviveScenarioExport(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Scenario file must contain a JSON object.');
+  if (data.format !== 'financial-sims-scenario') throw new Error('This is not a Financial Simulator scenario file.');
+  if (data.version !== 1) throw new Error(`Unsupported scenario version: ${data.version ?? 'missing'}.`);
+  if (!data.state || typeof data.state !== 'object') throw new Error('Scenario state is missing.');
+  if (!Array.isArray(data.state.accounts) || !Array.isArray(data.state.blocks)) throw new Error('Scenario accounts or cash flows are invalid.');
+  return {
+    name: typeof data.name === 'string' && data.name.trim() ? data.name.trim() : 'Imported scenario',
+    settings: data.settings && typeof data.settings === 'object' ? data.settings : {},
+    notes: typeof data.notes === 'string' ? data.notes : '',
+    state: reviveState(data.state),
+  };
+}
+
 /** Rebuild live objects (Account instances w/ nested ReturnsSchedule, blocks, global ReturnsSchedule) from plain data. */
 export function reviveState(data) {
   const accounts = {};
@@ -56,7 +74,9 @@ export function reviveState(data) {
   }
   const blocks = (data.blocks || []).map(b => (b.kind === 'loan' ? createLoanBlock(b) : createBlock(b)));
   const globalReturnsSchedule = reviveReturnsSchedule(data.globalReturnsSchedule);
-  return { accounts, blocks, globalReturnsSchedule };
+  const marketEvents = (data.marketEvents || []).map(event => createMarketEvent(event));
+  const withdrawalOrder = Array.isArray(data.withdrawalOrder) ? [...data.withdrawalOrder] : [];
+  return { accounts, blocks, globalReturnsSchedule, marketEvents, withdrawalOrder };
 }
 
 function safeParse(json) {

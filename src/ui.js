@@ -13,6 +13,7 @@ import { createScenarioExport, reviveScenarioExport, saveAutosave, loadAutosave,
 import { buildBaseScenario } from './baseScenario.js';
 import { loadMeScenario } from './meScenario.js';
 import { createMarketEvent } from './marketEvents.js';
+import { buildTrackPrompt, buildTrackEditPrompt, validateTrackCreation, validateTrackEdit, requestDeepSeek } from './deepseek.js';
 
 function todayMonth() {
   const d = new Date();
@@ -109,7 +110,18 @@ export async function initUI(state) {
   const trackEditor = document.getElementById('trackEditor');
   const trackEditorBody = document.getElementById('trackEditorBody');
   const trackInspector = document.getElementById('trackInspector');
-  const trackState = { blockId: null, clipIndex: null, scrollLeft: 0, pixelsPerMonth: 5, pendingCenterRatio: null, scissorsMode: false };
+  const trackState = { blockId: null, clipIndex: null, scrollLeft: 0, pixelsPerMonth: 5, pendingCenterRatio: null, scissorsMode: false, smartEditMode: false };
+  const smartTrackDialog = document.getElementById('smartTrackDialog');
+  const smartTrackForm = document.getElementById('smartTrackForm');
+  const smartTrackPrompt = document.getElementById('smartTrackPrompt');
+  const smartTrackStatus = document.getElementById('smartTrackStatus');
+  const deepseekApiKey = document.getElementById('deepseekApiKey');
+  let smartTrackMode = 'create';
+
+  try { deepseekApiKey.value = sessionStorage.getItem('finSim.deepseekApiKey.v1') || ''; } catch {}
+  deepseekApiKey.addEventListener('input', () => {
+    try { sessionStorage.setItem('finSim.deepseekApiKey.v1', deepseekApiKey.value.trim()); } catch {}
+  });
 
   for (const c of cities()) {
     const opt = document.createElement('option');
@@ -457,6 +469,121 @@ export async function initUI(state) {
     return { block, clips, clip: clips[trackState.clipIndex] };
   }
 
+  function addTrackCell() {
+    const checking = Object.values(state.accounts).find(account => account.type === 'checking');
+    const window = simulationWindow();
+    const block = createBlock({
+      category: 'expense',
+      kind: 'continuous',
+      description: 'New cash flow',
+      amount: 12000,
+      startMonth: window.from,
+      endMonth: window.to,
+      sourceAccountId: checking?.id,
+    });
+    state.blocks.push(block);
+    trackState.blockId = block.id;
+    trackState.clipIndex = 0;
+    renderTrackEditor();
+  }
+
+  /** Deletes a track (income/expense/loan block) directly from the cash-flow track view. */
+  function removeTrackBlock(blockId) {
+    const block = state.blocks.find(item => item.id === blockId);
+    if (!block) return;
+    const kindLabel = block.kind === 'loan' ? 'financed purchase' : block.category;
+    const message = block.kind === 'loan'
+      ? `Remove "${block.description}" and its linked loan account? This can't be undone.`
+      : `Remove this ${kindLabel} track ("${block.description}")? This can't be undone.`;
+    if (!confirm(message)) return;
+    if (block.kind === 'loan' && block.debtAccountId) delete state.accounts[block.debtAccountId];
+    state.blocks = state.blocks.filter(item => item.id !== blockId);
+    if (trackState.blockId === blockId) {
+      trackState.blockId = null;
+      trackState.clipIndex = null;
+    }
+    renderAccounts();
+    renderTrackEditor();
+  }
+
+  function openSmartTrack(mode) {
+    smartTrackMode = mode;
+    smartTrackStatus.textContent = '';
+    smartTrackStatus.classList.remove('error');
+    smartTrackPrompt.value = '';
+    if (mode === 'edit') {
+      const selection = selectedTrack();
+      if (!selection || selection.block.kind === 'loan') return;
+      document.getElementById('smartTrackTitle').textContent = `Smart Edit: ${selection.block.description}`;
+      document.getElementById('smartTrackHelp').textContent = 'Describe how DeepSeek should revise this track. It will return a complete replacement schedule as JSON.';
+      smartTrackPrompt.placeholder = 'Example: Increase this tile by 15%, then pause the expense for six months beginning in 2031.';
+    } else {
+      document.getElementById('smartTrackTitle').textContent = 'Smart cash-flow track';
+      document.getElementById('smartTrackHelp').textContent = 'Describe the income or expense and how it changes over time. DeepSeek will return a new track as JSON.';
+      smartTrackPrompt.placeholder = 'Example: Add $36,000 per year of childcare from 2028 through 2032, then reduce it to $12,000 through 2035.';
+    }
+    smartTrackDialog.showModal();
+    smartTrackPrompt.focus();
+  }
+
+  function normalizedSchedule(clips, window) {
+    return buildScheduleClips(clips, window.from, window.to);
+  }
+
+  async function submitSmartTrack() {
+    const request = smartTrackPrompt.value.trim();
+    if (!request) throw new Error('Describe the cash flow or edit you want.');
+    const window = simulationWindow();
+    if (smartTrackMode === 'create') {
+      const accounts = Object.values(state.accounts).map(account => ({ id: account.id, name: account.name, type: account.type }));
+      const raw = await requestDeepSeek(deepseekApiKey.value.trim(), buildTrackPrompt({ request, window, accounts }));
+      const result = validateTrackCreation(raw, { window, accountIds: accounts.map(account => account.id) });
+      const checking = Object.values(state.accounts).find(account => account.type === 'checking');
+      const accountId = result.accountId || checking?.id || null;
+      const clips = normalizedSchedule(result.clips, window);
+      const block = createBlock({
+        category: result.category,
+        kind: 'continuous',
+        description: result.description,
+        amount: clips.find(clip => clip.annualAmount > 0)?.annualAmount || 0,
+        startMonth: window.from,
+        endMonth: window.to,
+        preTax: result.preTax,
+        targetAccountId: result.category === 'income' ? accountId : null,
+        sourceAccountId: result.category === 'expense' ? accountId : null,
+        sigma: result.sigma,
+        inflationAdjusted: result.inflationAdjusted,
+        useCustomSchedule: true,
+        amountSchedule: new AmountSchedule(clips),
+      });
+      state.blocks.push(block);
+      trackState.blockId = block.id;
+      trackState.clipIndex = 0;
+    } else {
+      const selection = selectedTrack();
+      if (!selection || selection.block.kind === 'loan') throw new Error('Select an editable cash-flow tile first.');
+      const currentTrack = {
+        id: selection.block.id,
+        description: selection.block.description,
+        category: selection.block.category,
+        clips: selection.clips,
+      };
+      const raw = await requestDeepSeek(deepseekApiKey.value.trim(), buildTrackEditPrompt({ request, window, track: currentTrack, selectedClipIndex: trackState.clipIndex }));
+      const result = validateTrackEdit(raw, { window, trackId: selection.block.id });
+      const clips = normalizedSchedule(result.clips, window);
+      if (result.description) selection.block.description = result.description;
+      selection.block.amount = clips.find(clip => clip.annualAmount > 0)?.annualAmount || 0;
+      selection.block.amountSchedule = new AmountSchedule(clips);
+      selection.block.useCustomSchedule = true;
+      selection.block.startMonth = window.from;
+      selection.block.endMonth = window.to;
+      trackState.clipIndex = Math.min(trackState.clipIndex, clips.length - 1);
+      trackState.smartEditMode = false;
+    }
+    smartTrackDialog.close();
+    renderTrackEditor();
+  }
+
   function trackCostLine(clips, window, totalMonths, timelineWidth, tone) {
     const maxAmount = Math.max(1, ...clips.map(clip => Math.abs(Number(clip.annualAmount) || 0)));
     const points = [];
@@ -575,19 +702,30 @@ export async function initUI(state) {
     scissorsButton.classList.toggle('active', trackState.scissorsMode);
     scissorsButton.setAttribute('aria-pressed', String(trackState.scissorsMode));
     scissorsButton.title = trackState.scissorsMode ? 'Exit splice mode' : 'Splice by clicking a track';
+    const smartEditButton = document.getElementById('trackSmartEdit');
+    smartEditButton.classList.toggle('active', trackState.smartEditMode);
+    smartEditButton.setAttribute('aria-pressed', String(trackState.smartEditMode));
+    smartEditButton.title = trackState.smartEditMode ? 'Exit Smart Edit mode' : 'Smart Edit: select a tile to edit with DeepSeek';
+    const addRow = `<div class="track-add-row"><button class="track-add-cell secondary" type="button" title="Add cash-flow track" aria-label="Add cash-flow track">+</button><button class="track-smart-cell secondary" type="button"><span aria-hidden="true">✦</span> Smart Cell</button><span class="track-add-hint">Add a track manually or generate one from a prompt</span></div>`;
     if (!blocks.length) {
-      trackEditorBody.innerHTML = '<div class="editor-empty"><h3>No recurring cash flows</h3><p>Add an income or expense to see it as a track.</p></div>';
+      trackEditorBody.innerHTML = `<div class="editor-empty"><h3>No recurring cash flows</h3><p>Add an income or expense to see it as a track.</p></div>${addRow}`;
+      trackEditorBody.querySelector('.track-add-cell').addEventListener('click', addTrackCell);
+      trackEditorBody.querySelector('.track-smart-cell').addEventListener('click', () => openSmartTrack('create'));
       renderTrackInspector();
       return;
     }
     trackEditorBody.innerHTML = `
       <div class="track-labels">
         <div class="track-corner">Cash flow</div>
-        ${blocks.map(block => `<button class="track-label" data-track-detail="${escapeHtml(block.id)}" type="button"><span class="track-kind ${block.kind === 'loan' ? 'loan' : block.category}">${block.kind === 'loan' ? 'purchase' : block.category}</span><strong>${escapeHtml(block.description)}</strong><small>${block.kind === 'loan' ? `${formatCompactMoney(loanDownPaymentAmount(block))} down · ${formatCompactMoney(loanMonthlyPayment(block))}/mo` : block.useCustomSchedule ? 'clip schedule' : 'simple recurring'}</small></button>`).join('')}
+        ${blocks.map(block => `<div class="track-label-row">
+          <button class="track-label" data-track-detail="${escapeHtml(block.id)}" type="button"><span class="track-kind ${block.kind === 'loan' ? 'loan' : block.category}">${block.kind === 'loan' ? 'purchase' : block.category}</span><strong>${escapeHtml(block.description)}</strong><small>${block.kind === 'loan' ? `${formatCompactMoney(loanDownPaymentAmount(block))} down · ${formatCompactMoney(loanMonthlyPayment(block))}/mo` : block.useCustomSchedule ? 'clip schedule' : 'simple recurring'}</small></button>
+          <button class="track-label-remove" data-track-remove="${escapeHtml(block.id)}" type="button" title="Delete this track" aria-label="Delete ${escapeHtml(block.description)} track">×</button>
+        </div>`).join('')}
       </div>
       <div class="track-scroll">
         <div class="track-timeline ${trackState.scissorsMode ? 'is-cutting' : ''}" style="width:${timelineWidth}px">
           <div class="track-ruler"><span class="track-range-start">${window.from}</span><div class="track-year-axis">${trackYearTicks(window, totalMonths)}</div><span class="track-range-end">${window.to}</span></div>
+
           ${blocks.map(block => {
             const clips = clipsForTrack(block, window);
             const tone = block.kind === 'loan' ? 'loan' : block.category;
@@ -604,7 +742,9 @@ export async function initUI(state) {
           <div class="track-hover-guide" hidden><span></span><time></time></div>
           <div class="track-cut-guide" hidden><span>✂</span><time></time></div>
         </div>
-      </div>`;
+      </div>${addRow}`;
+    trackEditorBody.querySelector('.track-add-cell').addEventListener('click', addTrackCell);
+    trackEditorBody.querySelector('.track-smart-cell').addEventListener('click', () => openSmartTrack('create'));
     const scroll = trackEditorBody.querySelector('.track-scroll');
     if (trackState.pendingCenterRatio != null) {
       scroll.scrollLeft = Math.max(0, trackState.pendingCenterRatio * timelineWidth - scroll.clientWidth / 2);
@@ -620,6 +760,10 @@ export async function initUI(state) {
         trackState.scrollLeft = scroll.scrollLeft;
         trackState.blockId = button.dataset.trackBlock;
         trackState.clipIndex = Number(button.dataset.trackClip);
+        if (trackState.smartEditMode) {
+          openSmartTrack('edit');
+          return;
+        }
         renderTrackEditor();
       });
     });
@@ -683,6 +827,12 @@ export async function initUI(state) {
         openBlockEditor(button.dataset.trackDetail);
       });
     });
+    trackEditorBody.querySelectorAll('[data-track-remove]').forEach(button => {
+      button.addEventListener('click', event => {
+        event.stopPropagation();
+        removeTrackBlock(button.dataset.trackRemove);
+      });
+    });
     renderTrackInspector();
   }
 
@@ -693,6 +843,7 @@ export async function initUI(state) {
     trackState.pixelsPerMonth = 5;
     trackState.pendingCenterRatio = null;
     trackState.scissorsMode = false;
+    trackState.smartEditMode = false;
     renderTrackEditor();
     trackEditor.showModal();
   });
@@ -716,8 +867,32 @@ export async function initUI(state) {
   });
   document.getElementById('trackScissors').addEventListener('click', () => {
     trackState.scissorsMode = !trackState.scissorsMode;
+    if (trackState.scissorsMode) trackState.smartEditMode = false;
     renderTrackEditor();
   });
+  document.getElementById('trackSmartEdit').addEventListener('click', () => {
+    trackState.smartEditMode = !trackState.smartEditMode;
+    if (trackState.smartEditMode) trackState.scissorsMode = false;
+    renderTrackEditor();
+  });
+  smartTrackForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    const submitButton = document.getElementById('submitSmartTrack');
+    submitButton.disabled = true;
+    smartTrackStatus.classList.remove('error');
+    smartTrackStatus.textContent = 'Sending structured JSON request to DeepSeek…';
+    try {
+      await submitSmartTrack();
+    } catch (error) {
+      smartTrackStatus.classList.add('error');
+      smartTrackStatus.textContent = error.message || 'Unable to complete the DeepSeek request.';
+    } finally {
+      submitButton.disabled = false;
+    }
+  });
+  const closeSmartTrack = () => smartTrackDialog.close();
+  document.getElementById('closeSmartTrack').addEventListener('click', closeSmartTrack);
+  document.getElementById('cancelSmartTrack').addEventListener('click', closeSmartTrack);
   document.getElementById('closeTrackEditor').addEventListener('click', () => trackEditor.close());
   trackEditor.addEventListener('click', event => { if (event.target === trackEditor) trackEditor.close(); });
   trackEditor.addEventListener('close', () => renderBlocks());

@@ -388,7 +388,9 @@ export class Simulator {
     }
 
     const finalTotals = pf.particles.map(p => p.total());
+    const startingNetWorth = Object.values(accounts).reduce((sum, account) => sum + Number(account.balance || 0), 0);
     const bankruptCount = pf.particles.filter((p, index) => p.hasShortfall || finalTotals[index] < 0).length;
+    const endingBelowStartingCount = finalTotals.filter(total => total < startingNetWorth).length;
     const solvencyRate = 1 - bankruptCount / finalTotals.length;
 
     const fireStats = fireSuccessRate != null
@@ -407,6 +409,7 @@ export class Simulator {
       solvencyRate,
       bankruptcyCount: bankruptCount,
       particleCount: this.numParticles,
+      endingBelowStartingCount,
       maximumDebt,
       resampleEvents,
       fireStats,

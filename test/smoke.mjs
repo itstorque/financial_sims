@@ -11,12 +11,37 @@ import { childCostAmountSchedule, SF_CHILD_COST_BRACKETS } from '../src/childCos
 import { buildBaseScenario, BASE_SCENARIO_NAME } from '../src/baseScenario.js';
 import { createMarketEvent, sampleMarketEvents, eventAppliesToAccount } from '../src/marketEvents.js';
 import { accountColumnKey, buildResultsDataFrameRows, rowsToCsv, buildPythonSnippet } from '../src/exportData.js';
+import { buildTrackPrompt, buildTrackEditPrompt, validateTrackCreation, validateTrackEdit } from '../src/deepseek.js';
 
 let failures = 0;
 function assert(cond, msg) {
   if (!cond) { console.error('FAIL:', msg); failures++; }
   else console.log('ok  :', msg);
 }
+
+// --- Structured AI cash-flow edits ---
+const aiWindow = { from: '2026-01', to: '2040-12' };
+const aiAccounts = [{ id: 'checking-1', name: 'Checking', type: 'checking' }];
+const createPrompt = buildTrackPrompt({ request: 'Childcare that gets cheaper later', window: aiWindow, accounts: aiAccounts });
+assert(createPrompt.task === 'create_cash_flow_track' && createPrompt.output_shape.operation === 'add_track', 'Smart Cell prompt requests a strict add-track JSON operation');
+const aiTrack = validateTrackCreation({
+  operation: 'add_track',
+  track: {
+    description: 'Childcare', category: 'expense', inflationAdjusted: true, accountId: 'checking-1',
+    clips: [
+      { from: '2026-01', to: '2030-12', name: 'Full-time care', annualAmount: 36000 },
+      { from: '2031-01', to: '2035-12', name: 'After-school care', annualAmount: 12000 },
+    ],
+  },
+}, { window: aiWindow, accountIds: ['checking-1'] });
+assert(aiTrack.category === 'expense' && aiTrack.clips.length === 2, 'Smart Cell JSON validates into a cash-flow track');
+const editPrompt = buildTrackEditPrompt({ request: 'Pause in 2032', window: aiWindow, track: { id: 'track-1', clips: aiTrack.clips }, selectedClipIndex: 1 });
+assert(editPrompt.task === 'edit_cash_flow_schedule' && editPrompt.current_track.id === 'track-1', 'Smart Edit prompt includes the selected track as JSON context');
+const aiEdit = validateTrackEdit({
+  operation: 'replace_schedule', trackId: 'track-1',
+  clips: [{ from: '2026-01', to: '2040-12', name: 'Paused', annualAmount: 0 }],
+}, { window: aiWindow, trackId: 'track-1' });
+assert(aiEdit.clips[0].annualAmount === 0, 'Smart Edit accepts a valid replacement schedule');
 
 // --- Tax progressivity ---
 const low = computeAnnualTax(50000, 'Default', 0);
@@ -92,6 +117,7 @@ assert(out.individualTraces.every(trace => trace.length === 36), 'every individu
 assert(out.individualTraces.every((trace, index) => trace.at(-1) === out.finalParticles[index].total()), 'individual path endpoints match final particle values');
 assert(out.bankruptcyCount >= 0 && out.bankruptcyCount <= 50, 'summary exposes a valid bankruptcy count');
 assert(out.particleCount === 50, 'summary exposes the simulated path count');
+assert(out.endingBelowStartingCount >= 0 && out.endingBelowStartingCount <= 50, 'summary exposes a valid count of paths ending below their starting net worth');
 assert(out.maximumDebt >= 0, 'summary exposes maximum debt as a non-negative amount');
 assert(out.retirementReadinessTimeline.length === 36, 'summary exposes retirement readiness for every month');
 assert(out.retirementReadinessTimeline.every(point => point.successRate >= 0 && point.successRate <= 1), 'retirement readiness probabilities stay in range');

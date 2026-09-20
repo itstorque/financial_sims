@@ -61,6 +61,7 @@
             <span id="trackWindowLabel"></span>
             <div class="track-zoom-controls" aria-label="Timeline zoom">
               <button id="trackScissors" class="track-scissors" type="button" title="Splice by clicking a track" aria-label="Splice by clicking a track" aria-pressed="false">✂</button>
+              <button id="trackSmartEdit" class="track-smart-edit" type="button" title="Smart Edit: select a tile to edit with DeepSeek" aria-label="Smart Edit: select a tile to edit with DeepSeek" aria-pressed="false">✦</button>
               <button id="trackZoomOut" class="secondary" type="button" title="Zoom out" aria-label="Zoom out">−</button>
               <output id="trackZoomLevel" aria-live="polite">100%</output>
               <button id="trackZoomIn" class="secondary" type="button" title="Zoom in" aria-label="Zoom in">+</button>
@@ -71,6 +72,26 @@
         <div id="trackEditorBody" class="track-editor-body"></div>
         <section id="trackInspector" class="track-inspector" aria-live="polite"></section>
       </div>
+    </dialog>
+
+    <dialog id="smartTrackDialog" class="smart-track-dialog" aria-labelledby="smartTrackTitle">
+      <form id="smartTrackForm" method="dialog">
+        <header class="smart-track-header">
+          <div><span class="smart-badge">AI</span><h2 id="smartTrackTitle">Smart cash-flow track</h2></div>
+          <button id="closeSmartTrack" class="icon-button secondary" type="button" aria-label="Close smart track">×</button>
+        </header>
+        <div class="smart-track-content">
+          <p id="smartTrackHelp">Describe the income or expense and how it changes over time.</p>
+          <label>Your instructions
+            <textarea id="smartTrackPrompt" rows="5" placeholder="Example: Add $36,000 per year of childcare from 2028 through 2032, then reduce it to $12,000 through 2035."></textarea>
+          </label>
+          <div id="smartTrackStatus" class="smart-track-status" aria-live="polite"></div>
+        </div>
+        <footer class="smart-track-actions">
+          <button id="cancelSmartTrack" class="secondary" type="button">Cancel</button>
+          <button id="submitSmartTrack" type="submit"><span aria-hidden="true">✦</span> Generate JSON edit</button>
+        </footer>
+      </form>
     </dialog>
 
     <div class="app-shell">
@@ -120,6 +141,8 @@
               <label class="settings-wide">Particles <input id="numParticles" type="number" value="300" min="20" max="2000" step="20"/></label>
               <label class="inline settings-wide"><input id="useParticleFilter" type="checkbox" checked/> Resampling</label>
               <label class="inline settings-wide"><input id="realDollars" type="checkbox"/> Show in today's $</label>
+              <label class="settings-wide">DeepSeek API key <input id="deepseekApiKey" type="password" autocomplete="off" placeholder="sk-..."/></label>
+              <p class="settings-wide api-key-note">Stored only for this browser tab. The key is sent directly to DeepSeek when a Smart Cell or Smart Edit is requested.</p>
             </div>
           </div>
           <div id="summaryStats" class="summary"></div>
@@ -226,6 +249,8 @@
               <span id="plotsExportStatus" class="small" role="status" aria-live="polite"></span>
             </div>
           </div>
+          <p id="plotsEmptyState" class="small">Run the simulation to see updated plots.</p>
+          <div id="plotsContent" class="view-hidden">
           <article id="balanceChartCard" class="chart-card">
             <div class="chart-heading">
               <h3>Net worth range</h3>
@@ -280,6 +305,7 @@
               <div class="plot-hint">Drag to pan · Scroll to zoom · Use the toolbar to box zoom or reset</div>
             </div>
           </article>
+          </div>
         </section>
 
         <section id="summaryView" class="page-view view-hidden" aria-label="Simulation summary">
@@ -296,6 +322,10 @@
           <div id="summaryContent" class="view-hidden">
             <div id="summaryHeroCards" class="summary-hero-grid"></div>
             <article id="retirementRecommendation" class="summary-recommendation"></article>
+            <article class="summary-panel summary-insights-panel">
+              <div class="chart-heading"><h3>Key risks &amp; actions</h3></div>
+              <div id="summaryInsights" class="summary-insights"></div>
+            </article>
             <div class="summary-columns">
               <article class="summary-panel">
                 <div class="chart-heading"><h3>Major events &amp; expenses</h3></div>
@@ -310,6 +340,7 @@
               <div class="chart-heading"><h3>At target retirement</h3></div>
               <div id="summaryRetirementStanding"></div>
             </article>
+            <p class="summary-method-note">Planning estimate only. Results depend on the configured returns, inflation, taxes, expenses, rare events, and withdrawal assumptions—not a guarantee of future outcomes.</p>
           </div>
         </section>
 

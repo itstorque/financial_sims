@@ -97,7 +97,7 @@ async function main() {
     if (updateHash) {
       try { history.replaceState(null, '', VIEW_HASHES[view]); } catch {}
     }
-    if (view === 'plots') { renderBalance(); renderAccountMix(); }
+    if (view === 'plots') { renderPlotsEmptyState(); renderBalance(); renderAccountMix(); }
     else if (view === 'summary') { renderSummaryView(); }
     else if (view === 'reports') { renderReportsView(); }
     else { document.getElementById('scenarios')?.scrollIntoView({ block: 'start' }); }
@@ -170,11 +170,13 @@ async function main() {
       bankruptcyCount: out.bankruptcyCount,
       particleCount: out.particleCount,
       maximumDebt: out.maximumDebt,
+      endingBelowStartingCount: out.endingBelowStartingCount,
       retirementReadinessTimeline: out.retirementReadinessTimeline,
     };
     renderBalance();
     renderAccountFilters();
     renderAccountMix();
+    renderPlotsEmptyState();
     renderSummaryView();
     renderReportsView();
 
@@ -212,6 +214,17 @@ async function main() {
       const factor = inflationFactorAt(m);
       return Object.fromEntries(Object.entries(row).map(([id, v]) => [id, v / factor]));
     });
+  }
+
+  // Shows a reminder to run the simulation instead of stale/empty charts on
+  // the Plots page (mirrors the same pattern used by renderSummaryView /
+  // renderReportsView for their respective empty states).
+  function renderPlotsEmptyState() {
+    const emptyEl = document.getElementById('plotsEmptyState');
+    const contentEl = document.getElementById('plotsContent');
+    const hasData = !!lastChartData;
+    emptyEl.classList.toggle('view-hidden', hasData);
+    contentEl.classList.toggle('view-hidden', !hasData);
   }
 
   function renderBalance() {
@@ -311,6 +324,47 @@ async function main() {
     return { tone: 'danger', title: `The current retirement target is high risk`, detail: `Only ${formatPercent(success)} of paths reach the FIRE target. Consider delaying retirement, increasing contributions, or reducing planned spending.` };
   }
 
+  function worstDrawdown(labels, values) {
+    let peak = values[0];
+    let peakIndex = 0;
+    let worst = { rate: 0, peakIndex: 0, troughIndex: 0 };
+    for (let index = 1; index < values.length; index++) {
+      if (values[index] > peak) { peak = values[index]; peakIndex = index; }
+      if (peak <= 0) continue;
+      const rate = values[index] / peak - 1;
+      if (rate < worst.rate) worst = { rate, peakIndex, troughIndex: index };
+    }
+    return { ...worst, peakDate: labels[worst.peakIndex], troughDate: labels[worst.troughIndex] };
+  }
+
+  function buildSummaryInsights({ data, startingNetWorth, retirementIndex, median, p10, fireNumber, currentAge, targetAge, drawdown }) {
+    const insights = [];
+    const bankruptcyRate = data.particleCount ? data.bankruptcyCount / data.particleCount : 0;
+    const belowStartRate = data.particleCount ? data.endingBelowStartingCount / data.particleCount : 0;
+    if (bankruptcyRate > .1) insights.push({ tone: 'danger', title: 'Material insolvency risk', detail: `${formatPercent(bankruptcyRate)} of paths encounter an unpaid shortfall or finish negative. Increase liquid reserves or reduce fixed commitments.` });
+    else if (bankruptcyRate > 0) insights.push({ tone: 'watch', title: 'Some paths run out of available funds', detail: `${data.bankruptcyCount} paths become insolvent. Review the toughest years and withdrawal order.` });
+    else insights.push({ tone: 'good', title: 'No simulated insolvencies', detail: `All ${data.particleCount} paths covered modeled obligations through the simulation window.` });
+
+    if (p10[retirementIndex] < fireNumber) insights.push({ tone: 'watch', title: 'Downside retirement case misses the target', detail: `P10 at retirement is ${formatMoney(p10[retirementIndex])}, versus a ${formatMoney(fireNumber)} FIRE target. Preserve flexibility in timing or spending.` });
+    else insights.push({ tone: 'good', title: 'Downside case clears the retirement target', detail: `Even P10 at age ${targetAge} is ${formatMoney(p10[retirementIndex])}.` });
+
+    if (drawdown.rate <= -1) insights.push({ tone: 'watch', title: 'Median net worth crosses below zero', detail: `The median reaches ${formatMoney(median[drawdown.troughIndex])} in ${drawdown.troughDate}, usually reflecting leveraged debt. This is not automatically insolvency; compare it with liquid reserves and shortfall outcomes.` });
+    else if (drawdown.rate < -.2) insights.push({ tone: 'watch', title: 'Plan experiences a meaningful drawdown', detail: `Median net worth falls ${formatPercent(Math.abs(drawdown.rate))} from ${drawdown.peakDate} to ${drawdown.troughDate}. Maintain enough liquidity to avoid forced selling.` });
+    else insights.push({ tone: 'good', title: 'Median path has limited drawdown', detail: `Worst peak-to-trough decline is ${formatPercent(Math.abs(drawdown.rate))}.` });
+
+    if (data.maximumDebt > startingNetWorth * .75) insights.push({ tone: 'watch', title: 'Debt is large relative to starting wealth', detail: `Peak debt of ${formatMoney(data.maximumDebt)} equals ${formatPercent(data.maximumDebt / Math.max(1, startingNetWorth))} of starting net worth.` });
+    if (belowStartRate > .05) insights.push({ tone: 'watch', title: 'Some paths lose ground over the full horizon', detail: `${data.endingBelowStartingCount} of ${data.particleCount} paths finish below starting net worth.` });
+
+    const first90 = data.retirementReadinessTimeline.findIndex(point => point.successRate >= .9);
+    if (first90 >= 0) {
+      const age = currentAge + first90 / 12;
+      insights.push({ tone: age <= targetAge ? 'good' : 'watch', title: '90% confidence milestone', detail: `The plan first reaches a 90% FIRE-success rate near age ${Math.ceil(age)}.` });
+    } else {
+      insights.push({ tone: 'danger', title: '90% confidence is not reached', detail: 'No month in the modeled horizon reaches a 90% FIRE-success rate.' });
+    }
+    return insights;
+  }
+
   function renderSummaryView() {
     const empty = document.getElementById('summaryEmptyState');
     const content = document.getElementById('summaryContent');
@@ -333,7 +387,13 @@ async function main() {
     const maxIndex = median.indexOf(maxValue);
     const retirementIndex = Math.min(data.months - 1, data.retirementMonthIndex);
     const retirementMedian = median[retirementIndex];
+    const currentAge = parseInt(document.getElementById('currentAge').value, 10) || 0;
+    const targetAge = parseInt(document.getElementById('retireAge').value, 10) || currentAge;
     const bankruptcyRate = data.particleCount ? data.bankruptcyCount / data.particleCount : 0;
+    const belowStartRate = data.particleCount ? data.endingBelowStartingCount / data.particleCount : 0;
+    const drawdown = worstDrawdown(data.labels, median);
+    const first90Index = data.retirementReadinessTimeline.findIndex(point => point.successRate >= .9);
+    const first90Age = first90Index >= 0 ? currentAge + first90Index / 12 : null;
     const cards = [
       { label: 'Starting net worth', value: formatMoney(startBalance), sub: `${Object.keys(state.accounts).length} accounts` },
       { label: 'Lowest median balance', value: formatMoney(minValue), sub: data.labels[minIndex] },
@@ -341,15 +401,20 @@ async function main() {
       { label: 'Maximum debt observed', value: formatMoney(data.maximumDebt), sub: 'Across all simulated paths' },
       { label: 'Insolvent simulations', value: `${data.bankruptcyCount} / ${data.particleCount}`, sub: `${formatPercent(bankruptcyRate)} ever had a shortfall or ended negative`, tone: bankruptcyRate > .1 ? 'danger' : bankruptcyRate > 0 ? 'watch' : 'good' },
       { label: 'At target retirement', value: formatMoney(retirementMedian), sub: `Median · ${data.labels[retirementIndex]}` },
+      { label: 'Worst median drawdown', value: drawdown.rate <= -1 ? '>100%' : formatPercent(Math.abs(drawdown.rate)), sub: `${drawdown.peakDate} → ${drawdown.troughDate}`, tone: drawdown.rate < -.2 ? 'watch' : 'good' },
+      { label: '90% confidence age', value: first90Age == null ? 'Not reached' : String(Math.ceil(first90Age)), sub: first90Age == null ? 'Within modeled horizon' : `${Math.ceil(first90Age - currentAge)} years from now`, tone: first90Age == null ? 'danger' : first90Age > targetAge ? 'watch' : 'good' },
+      { label: 'Finish below start', value: `${data.endingBelowStartingCount} / ${data.particleCount}`, sub: formatPercent(belowStartRate), tone: belowStartRate > .1 ? 'watch' : 'good' },
     ];
     document.getElementById('summaryHeroCards').innerHTML = cards.map(card => `
       <div class="summary-hero-card ${card.tone || ''}"><span>${escapeHtml(card.label)}</span><strong>${escapeHtml(card.value)}</strong><small>${escapeHtml(card.sub)}</small></div>`).join('');
 
-    const currentAge = parseInt(document.getElementById('currentAge').value, 10) || 0;
-    const targetAge = parseInt(document.getElementById('retireAge').value, 10) || currentAge;
     const recommendation = retirementRecommendation(data, currentAge, targetAge);
     document.getElementById('retirementRecommendation').className = `summary-recommendation ${recommendation.tone}`;
     document.getElementById('retirementRecommendation').innerHTML = `<span class="summary-recommendation-icon">${recommendation.tone === 'good' ? '✓' : '!'}</span><div><span>Retirement recommendation</span><h3>${escapeHtml(recommendation.title)}</h3><p>${escapeHtml(recommendation.detail)}</p></div>`;
+
+    const displayedFireNumber = document.getElementById('realDollars').checked ? (data.fireStats?.fireNumber || 0) / inflationFactorAt(retirementIndex) : (data.fireStats?.fireNumber || 0);
+    const insights = buildSummaryInsights({ data, startingNetWorth: startBalance, retirementIndex, median, p10, fireNumber: displayedFireNumber, currentAge, targetAge, drawdown });
+    document.getElementById('summaryInsights').innerHTML = insights.map(insight => `<div class="summary-insight ${insight.tone}"><i>${insight.tone === 'good' ? '✓' : '!'}</i><div><strong>${escapeHtml(insight.title)}</strong><span>${escapeHtml(insight.detail)}</span></div></div>`).join('');
 
     const events = summaryPlanEvents();
     document.getElementById('summaryEvents').innerHTML = events.length ? events.map(event => `
@@ -358,7 +423,7 @@ async function main() {
     document.getElementById('summaryToughYears').innerHTML = toughestYears(data.labels, median).map((year, index) => `
       <div class="summary-stress"><span class="summary-stress-rank">${index + 1}</span><div><strong>${year.year}</strong><small>Median ends at ${formatMoney(year.value)}</small></div><b class="${year.change < 0 ? 'negative' : ''}">${year.change >= 0 ? '+' : ''}${formatPercent(year.change)}</b></div>`).join('');
 
-    const fireNumber = data.fireStats?.fireNumber || 0;
+    const fireNumber = displayedFireNumber;
     const gap = retirementMedian - fireNumber;
     const success = data.fireStats?.successRate || 0;
     const progress = fireNumber > 0 ? Math.min(100, Math.max(0, retirementMedian / fireNumber * 100)) : 0;
@@ -397,7 +462,8 @@ async function main() {
       { label: 'Solvency rate (final)', value: formatPercent(solvencyRate) },
     ];
     if (fireStats) {
-      cards.push({ label: 'FIRE number at retirement', value: formatMoney(fireStats.fireNumber) });
+      const displayedFireNumber = document.getElementById('realDollars').checked ? fireStats.fireNumber / inflationFactorAt(retirementMonthIndex) : fireStats.fireNumber;
+      cards.push({ label: 'FIRE number at retirement', value: formatMoney(displayedFireNumber) });
       cards.push({ label: 'P(reach FIRE by retirement)', value: formatPercent(fireStats.successRate) });
     }
     if (useParticleFilter) cards.push({ label: 'Resample events', value: String(resampleEvents) });

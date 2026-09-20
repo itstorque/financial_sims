@@ -15,6 +15,7 @@ import { loadMeScenario } from './meScenario.js';
 import { createMarketEvent } from './marketEvents.js';
 import { buildTrackPrompt, buildTrackEditPrompt, validateTrackCreation, validateTrackEdit, requestDeepSeek } from './deepseek.js';
 import { renderMarkdown } from './markdown.js';
+import { showLoading, hideLoading, withLoading } from './loading.js';
 import { distributionHistogram, distributionMean, distributionRange } from './distributions.js';
 
 function todayMonth() {
@@ -177,7 +178,7 @@ function applySettings(settings) {
   if (settings.retireAge != null) document.getElementById('retireAge').value = settings.retireAge;
   if (settings.city != null) document.getElementById('citySelect').value = settings.city;
   if (settings.numParticles != null) document.getElementById('numParticles').value = settings.numParticles;
-  if (settings.useParticleFilter != null) document.getElementById('useParticleFilter').checked = settings.useParticleFilter;
+  document.getElementById('useParticleFilter').checked = settings.useParticleFilter === true;
   if (settings.simulationSeed != null) document.getElementById('simulationSeed').value = settings.simulationSeed;
   if (settings.inflationRate != null) document.getElementById('inflationRate').value = settings.inflationRate;
   if (settings.inflationVolatility != null) document.getElementById('inflationVolatility').value = settings.inflationVolatility;
@@ -222,8 +223,9 @@ export async function initUI(state) {
   const trackEditorContent = document.getElementById('trackEditorContent');
   const tracksPageView = document.getElementById('tracksView');
   const trackEditorBody = document.getElementById('trackEditorBody');
-  const trackInspector = document.getElementById('trackInspector');
-  const trackState = { blockId: null, clipIndex: null, scrollLeft: 0, pixelsPerMonth: 5, pendingCenterRatio: null, scissorsMode: false, smartEditMode: false, activeTab: 'tracks', chartCollapsed: false };
+  const trackInspectorPanel = document.getElementById('trackInspector');
+  const trackInspector = document.getElementById('trackInspectorBody');
+  const trackState = { blockId: null, clipIndex: null, scrollLeft: 0, scrollTop: 0, pixelsPerMonth: 5, pendingCenterRatio: null, scissorsMode: false, smartEditMode: false, activeTab: 'tracks', chartCollapsed: false, inspectorCollapsed: false, inspectorHeight: 260 };
   const smartTrackDialog = document.getElementById('smartTrackDialog');
   const smartTrackForm = document.getElementById('smartTrackForm');
   const smartTrackPrompt = document.getElementById('smartTrackPrompt');
@@ -908,14 +910,24 @@ export async function initUI(state) {
     return `<svg class="track-cost-line ${tone}" viewBox="0 0 ${timelineWidth} 54" preserveAspectRatio="none" aria-label="Average projected ${tone} cash flow with error bars, peaking at ${escapeHtml(formatCompactMoney(maxAmount))} per year" data-peak="${escapeHtml(formatCompactMoney(maxAmount))}">${band}<polyline points="${points.join(' ')}"/><line x1="0" y1="49" x2="${timelineWidth}" y2="49"/></svg>`;
   }
 
-  function trackYearTicks(window, totalMonths) {
+  // At low zoom levels, labeling every year causes the labels to overlap and
+  // become unreadable. Space out labeled ("major") ticks to "nice" year
+  // intervals (1/2/5/10/20/25/50/...) based on how many pixels a year
+  // actually occupies, while still drawing a thin gridline for every year.
+  function trackYearTicks(window, totalMonths, pixelsPerMonth) {
     const start = keyToIdx(window.from);
     const end = keyToIdx(window.to);
     const firstYear = Math.ceil(start / 12);
+    const lastYear = Math.floor(end / 12);
+    const pixelsPerYear = pixelsPerMonth * 12;
+    const MIN_LABEL_SPACING_PX = 42;
+    const NICE_STEPS = [1, 2, 5, 10, 20, 25, 50, 100, 200, 500];
+    const labelStep = NICE_STEPS.find(step => step * pixelsPerYear >= MIN_LABEL_SPACING_PX) || NICE_STEPS.at(-1);
     const ticks = [];
-    for (let year = firstYear; year * 12 <= end; year++) {
+    for (let year = firstYear; year <= lastYear; year++) {
       const offset = year * 12 - start;
-      ticks.push(`<span class="track-year-tick" style="left:${offset / totalMonths * 100}%"><b>${year}</b></span>`);
+      const isMajor = year % labelStep === 0;
+      ticks.push(`<span class="track-year-tick ${isMajor ? '' : 'track-year-tick--minor'}" style="left:${offset / totalMonths * 100}%">${isMajor ? `<b>${year}</b>` : ''}</span>`);
     }
     return ticks.join('');
   }
@@ -1035,25 +1047,18 @@ export async function initUI(state) {
     smartEditButton.classList.toggle('active', trackState.smartEditMode);
     smartEditButton.setAttribute('aria-pressed', String(trackState.smartEditMode));
     smartEditButton.title = trackState.smartEditMode ? 'Exit Smart Edit mode' : 'Smart Edit: select a tile to edit with DeepSeek';
-    const addRow = `<div class="track-add-row"><button class="track-add-cell secondary" type="button" title="Add cash-flow track" aria-label="Add cash-flow track">+</button><button class="track-smart-cell secondary" type="button"><span aria-hidden="true">✦</span> Smart Cell</button><span class="track-add-hint">Add a track manually or generate one from a prompt</span></div>`;
-    if (!blocks.length) {
-      trackEditorBody.innerHTML = `<div class="editor-empty"><h3>No recurring cash flows</h3><p>Add an income or expense to see it as a track.</p></div>${addRow}`;
-      trackEditorBody.querySelector('.track-add-cell').addEventListener('click', addTrackCell);
-      trackEditorBody.querySelector('.track-smart-cell').addEventListener('click', () => openSmartTrack('create'));
-      renderTrackInspector();
-      return;
-    }
+    const addRow = `<div class="track-label-row track-add-row"><span class="track-add-label">Add track</span><button class="track-add-cell" type="button" title="Add cash-flow track manually" aria-label="Add cash-flow track manually">+</button><button class="track-smart-cell" type="button" title="Generate a track with Smart Cell" aria-label="Generate a track with Smart Cell"><span aria-hidden="true">✦</span></button></div>`;
     trackEditorBody.innerHTML = `
       <div class="track-labels">
         <div class="track-corner">Cash flow</div>
         ${blocks.map(block => `<div class="track-label-row">
           <button class="track-label" data-track-detail="${escapeHtml(block.id)}" type="button"><span class="track-kind ${block.kind === 'loan' ? 'loan' : block.category}">${block.kind === 'loan' ? 'purchase' : block.category}</span><strong>${escapeHtml(block.description)}</strong><small>${block.kind === 'loan' ? `${formatCompactMoney(loanDownPaymentAmount(block))} down · ${formatCompactMoney(loanMonthlyPayment(block))}/mo` : `${block.useCustomSchedule ? 'clip schedule' : 'simple recurring'}${block.category === 'income' && block.annualGrowthRate ? ` · ${pct(block.annualGrowthRate)}% raise/yr` : ''}`}</small></button>
           <button class="track-label-remove" data-track-remove="${escapeHtml(block.id)}" type="button" title="Delete this track" aria-label="Delete ${escapeHtml(block.description)} track"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6 1.5h4a.5.5 0 0 1 .5.5v1h3a.5.5 0 0 1 0 1h-.55l-.7 9.11a1.5 1.5 0 0 1-1.5 1.39H5.25a1.5 1.5 0 0 1-1.5-1.39L3.05 4H2.5a.5.5 0 0 1 0-1h3V2a.5.5 0 0 1 .5-.5Zm-.5 2h5V2.5h-5V3.5Zm-1.44 1 .69 8.96a.5.5 0 0 0 .5.46h5.5a.5.5 0 0 0 .5-.46L11.94 4.5H4.06ZM6.5 6a.5.5 0 0 1 .5.5v5a.5.5 0 0 1-1 0v-5a.5.5 0 0 1 .5-.5Zm3 0a.5.5 0 0 1 .5.5v5a.5.5 0 0 1-1 0v-5a.5.5 0 0 1 .5-.5Z" fill="currentColor"/></svg></button>
-        </div>`).join('')}
+        </div>`).join('')}${addRow}
       </div>
       <div class="track-scroll">
         <div class="track-timeline ${trackState.scissorsMode ? 'is-cutting' : ''}" style="width:${timelineWidth}px">
-          <div class="track-ruler"><span class="track-range-start">${window.from}</span><div class="track-year-axis">${trackYearTicks(window, totalMonths)}</div><span class="track-range-end">${window.to}</span></div>
+          <div class="track-ruler"><span class="track-range-start">${window.from}</span><div class="track-year-axis">${trackYearTicks(window, totalMonths, pixelsPerMonth)}</div><span class="track-range-end">${window.to}</span></div>
 
           ${blocks.map(block => {
             const clips = clipsForTrack(block, window);
@@ -1072,10 +1077,11 @@ export async function initUI(state) {
               return `<button class="track-clip ${block.kind === 'loan' ? 'loan' : block.category} ${paused ? 'paused' : ''} ${selected ? 'selected' : ''}" style="width:${width}%" data-track-block="${escapeHtml(block.id)}" data-track-clip="${index}" type="button" title="${escapeHtml(clip.name)} · ${clip.from} → ${clip.to} · ${amountLabel}"><strong>${escapeHtml(clip.name)}</strong><small>${paused ? '$0' : amountLabel}</small></button>`;
             }).join('')}${costLine}</div>`;
           }).join('')}
+          <div class="track-row track-add-timeline" aria-hidden="true"></div>
           <div class="track-hover-guide" hidden><span></span><time></time></div>
           <div class="track-cut-guide" hidden><span>✂</span><time></time></div>
         </div>
-      </div>${addRow}`;
+      </div>`;
     trackEditorBody.querySelector('.track-add-cell').addEventListener('click', addTrackCell);
     trackEditorBody.querySelector('.track-smart-cell').addEventListener('click', () => openSmartTrack('create'));
     const scroll = trackEditorBody.querySelector('.track-scroll');
@@ -1086,6 +1092,11 @@ export async function initUI(state) {
     } else {
       scroll.scrollLeft = trackState.scrollLeft;
     }
+    const labelsScroll = trackEditorBody.querySelector('.track-labels');
+    labelsScroll.style.paddingBottom = `${scroll.offsetHeight - scroll.clientHeight}px`;
+    scroll.scrollTop = trackState.scrollTop;
+    labelsScroll.scrollTop = scroll.scrollTop;
+    trackState.scrollTop = scroll.scrollTop;
     const chartScroll = document.getElementById('trackCashflowScroll');
     if (chartScroll) {
       chartScroll.scrollLeft = scroll.scrollLeft;
@@ -1093,7 +1104,13 @@ export async function initUI(state) {
     }
     scroll.addEventListener('scroll', () => {
       trackState.scrollLeft = scroll.scrollLeft;
+      trackState.scrollTop = scroll.scrollTop;
+      if (labelsScroll.scrollTop !== scroll.scrollTop) labelsScroll.scrollTop = scroll.scrollTop;
       if (chartScroll) chartScroll.scrollLeft = scroll.scrollLeft;
+    }, { passive: true });
+    labelsScroll.addEventListener('scroll', () => {
+      trackState.scrollTop = labelsScroll.scrollTop;
+      if (scroll.scrollTop !== labelsScroll.scrollTop) scroll.scrollTop = labelsScroll.scrollTop;
     }, { passive: true });
     trackEditorBody.querySelectorAll('[data-track-block]').forEach(button => {
       button.addEventListener('click', () => {
@@ -1193,6 +1210,7 @@ export async function initUI(state) {
     trackState.blockId = null;
     trackState.clipIndex = null;
     trackState.scrollLeft = 0;
+    trackState.scrollTop = 0;
     trackState.pixelsPerMonth = 5;
     trackState.pendingCenterRatio = null;
     trackState.scissorsMode = false;
@@ -1201,6 +1219,15 @@ export async function initUI(state) {
   }
   function moveTrackEditorContentTo(container) {
     if (trackEditorContent.parentElement !== container) container.appendChild(trackEditorContent);
+    const chartToggle = document.getElementById('trackChartToggle');
+    const isFullPage = container.closest('.tracks-page-view') != null;
+    if (isFullPage) {
+      const toolbarRight = trackEditorContent.querySelector('.track-toolbar-right');
+      const zoomControls = toolbarRight.querySelector('.track-zoom-controls');
+      toolbarRight.insertBefore(chartToggle, zoomControls);
+    } else {
+      trackEditorContent.querySelector('.track-tabs').appendChild(chartToggle);
+    }
   }
   function activateTracksView() {
     resetTrackViewState();
@@ -1244,6 +1271,54 @@ export async function initUI(state) {
     button.innerHTML = `<span class="track-chart-toggle-icon" aria-hidden="true">${trackState.chartCollapsed ? EYE_CLOSED_ICON : EYE_OPEN_ICON}</span> ${trackState.chartCollapsed ? 'Show chart' : 'Hide chart'}`;
     document.getElementById('trackCashflowChart').classList.toggle('view-hidden', trackState.activeTab !== 'cashflow' || trackState.chartCollapsed);
   });
+
+  // The inspector panel (bottom of the tracks view) can be minimized to a
+  // thin bar, or grown/shrunk by dragging its top edge, so it doesn't have
+  // to eat screen space when the user just wants to see the tracks — but
+  // can still be expanded to comfortably fit every field when editing.
+  const trackInspectorCollapseButton = document.getElementById('trackInspectorCollapse');
+  function applyTrackInspectorCollapsed() {
+    trackInspectorPanel.classList.toggle('collapsed', trackState.inspectorCollapsed);
+    applyTrackInspectorHeight();
+    trackInspectorCollapseButton.textContent = trackState.inspectorCollapsed ? '⌃' : '⌄';
+    const label = trackState.inspectorCollapsed ? 'Expand inspector panel' : 'Minimize inspector panel';
+    trackInspectorCollapseButton.title = label;
+    trackInspectorCollapseButton.setAttribute('aria-label', label);
+    trackInspectorCollapseButton.setAttribute('aria-expanded', String(!trackState.inspectorCollapsed));
+  }
+  applyTrackInspectorCollapsed();
+  trackInspectorCollapseButton.addEventListener('click', () => {
+    trackState.inspectorCollapsed = !trackState.inspectorCollapsed;
+    applyTrackInspectorCollapsed();
+  });
+  function applyTrackInspectorHeight() {
+    trackEditorContent.style.setProperty('--track-inspector-height', `${trackState.inspectorCollapsed ? 35 : trackState.inspectorHeight}px`);
+  }
+  applyTrackInspectorHeight();
+  function beginTrackInspectorResize(event) {
+    if (trackState.inspectorCollapsed) return;
+    if (event.target.closest('#trackInspectorCollapse')) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    const startY = event.clientY;
+    const startHeight = trackInspectorPanel.getBoundingClientRect().height;
+    try { handle.setPointerCapture(event.pointerId); } catch {}
+    const onMove = moveEvent => {
+      const shellHeight = trackInspectorPanel.closest('.track-editor-shell')?.getBoundingClientRect().height || 800;
+      const maxHeight = Math.max(160, shellHeight - 220);
+      trackState.inspectorHeight = Math.min(maxHeight, Math.max(90, startHeight + (startY - moveEvent.clientY)));
+      applyTrackInspectorHeight();
+    };
+    const onUp = () => {
+      try { handle.releasePointerCapture(event.pointerId); } catch {}
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+  }
+  document.getElementById('trackInspectorResizeHandle').addEventListener('pointerdown', beginTrackInspectorResize);
+  document.getElementById('trackInspectorBar').addEventListener('pointerdown', beginTrackInspectorResize);
   function changeTrackZoom(nextPixelsPerMonth) {
     const scroll = trackEditorBody.querySelector('.track-scroll');
     const timeline = trackEditorBody.querySelector('.track-timeline');
@@ -1278,6 +1353,7 @@ export async function initUI(state) {
     submitButton.disabled = true;
     smartTrackStatus.classList.remove('error');
     smartTrackStatus.textContent = 'Sending structured JSON request to DeepSeek…';
+    showLoading('Generating Smart Cell', { detailText: 'Waiting for DeepSeek to respond' });
     try {
       await submitSmartTrack();
     } catch (error) {
@@ -1285,6 +1361,7 @@ export async function initUI(state) {
       smartTrackStatus.textContent = error.message || 'Unable to complete the DeepSeek request.';
     } finally {
       submitButton.disabled = false;
+      hideLoading();
     }
   });
   const closeSmartTrack = () => smartTrackDialog.close();
@@ -1849,8 +1926,10 @@ export async function initUI(state) {
     const file = scenarioFileInput.files?.[0];
     if (!file) return;
     try {
-      const data = reviveScenarioExport(JSON.parse(await file.text()));
-      applyImportedScenario(data, file.name);
+      await withLoading('Loading scenario…', async () => {
+        const data = reviveScenarioExport(JSON.parse(await file.text()));
+        applyImportedScenario(data, file.name);
+      });
     } catch (error) {
       scenarioStatus.textContent = error instanceof SyntaxError ? 'The selected file is not valid JSON.' : error.message;
     } finally {
@@ -1861,9 +1940,11 @@ export async function initUI(state) {
   document.getElementById('loadExampleScenario').addEventListener('click', async () => {
     scenarioStatus.textContent = 'Loading me.example.json…';
     try {
-      const response = await fetch('./me.example.json', { cache: 'no-store' });
-      if (!response.ok) throw new Error(`Could not load me.example.json (${response.status}).`);
-      applyImportedScenario(reviveScenarioExport(await response.json()), 'me.example.json');
+      await withLoading('Loading example scenario…', async () => {
+        const response = await fetch('./me.example.json', { cache: 'no-store' });
+        if (!response.ok) throw new Error(`Could not load me.example.json (${response.status}).`);
+        applyImportedScenario(reviveScenarioExport(await response.json()), 'me.example.json');
+      });
     } catch (error) {
       scenarioStatus.textContent = error instanceof SyntaxError ? 'me.example.json is not valid JSON.' : error.message;
     }

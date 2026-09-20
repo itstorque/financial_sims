@@ -20,9 +20,21 @@
       })();
     </script>
     <link rel="stylesheet" href="styles.css" />
-    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+    <script defer src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   </head>
   <body>
+    <div id="appLoading" class="app-loading" role="status" aria-live="polite" aria-atomic="true">
+      <div class="app-loading-card">
+        <span class="app-loading-spinner" aria-hidden="true"></span>
+        <strong id="appLoadingMessage">Loading financial simulator…</strong>
+        <span id="appLoadingDetail" class="app-loading-detail">Preparing your scenario</span>
+        <div id="appLoadingProgress" class="app-loading-progress" hidden>
+          <progress id="appLoadingBar" max="100" value="0">0%</progress>
+          <output id="appLoadingPercent" for="appLoadingBar">0%</output>
+        </div>
+      </div>
+    </div>
+
     <dialog id="blockEditor" class="editor-dialog" aria-labelledby="blockEditorTitle">
       <div class="editor-shell">
         <header class="editor-header">
@@ -86,12 +98,22 @@
                 <span class="expense"><i></i>Spend</span>
               </div>
             </div>
-            <div id="trackCashflowScroll" class="track-cashflow-scroll">
-              <svg id="trackCashflowSvg" class="track-cashflow-svg" preserveAspectRatio="none"></svg>
+            <div class="track-cashflow-body">
+              <div class="track-cashflow-gutter" aria-hidden="true"></div>
+              <div id="trackCashflowScroll" class="track-cashflow-scroll">
+                <svg id="trackCashflowSvg" class="track-cashflow-svg" preserveAspectRatio="none"></svg>
+              </div>
             </div>
           </div>
           <div id="trackEditorBody" class="track-editor-body"></div>
-          <section id="trackInspector" class="track-inspector" aria-live="polite"></section>
+          <section id="trackInspector" class="track-inspector" aria-live="polite">
+            <div id="trackInspectorResizeHandle" class="track-inspector-resize-handle" title="Drag to resize"></div>
+            <div id="trackInspectorBar" class="track-inspector-bar" title="Drag to resize details panel">
+              <span class="track-inspector-bar-label">Details</span>
+              <button id="trackInspectorCollapse" class="track-inspector-collapse-btn" type="button" title="Minimize panel" aria-label="Minimize inspector panel" aria-expanded="true">⌄</button>
+            </div>
+            <div id="trackInspectorBody" class="track-inspector-body"></div>
+          </section>
         </div>
       </div>
     </dialog>
@@ -121,30 +143,32 @@
         <header class="smart-track-header">
           <div><span class="smart-badge">AI</span><h2 id="summaryAskTitle">Ask about this simulation</h2></div>
           <div class="summary-ask-header-actions">
-            <button id="newSummaryConversation" class="secondary" type="button">New conversation</button>
+            <button id="newSummaryConversation" class="secondary" type="button"><span aria-hidden="true">✎</span> New conversation</button>
             <button id="closeSummaryAsk" class="icon-button secondary" type="button" aria-label="Close simulation assistant">×</button>
           </div>
         </header>
         <div class="summary-ask-content">
-          <p>DeepSeek receives the complete simulation input snapshot, monthly results table, plan events, and summary metrics. Your API key and scenario notes are never included.</p>
-          <div class="summary-ask-suggestions" aria-label="Suggested questions">
-            <button class="secondary" type="button" data-summary-question="Summarize my overall financial outlook, the strongest parts of the plan, and the three most important risks or actions.">Summarize my status</button>
-            <button class="secondary" type="button" data-summary-question="What causes the lowest median balance, and which cash flows or accounts contribute most to it?">Explain the low point</button>
-            <button class="secondary" type="button" data-summary-question="How resilient is my retirement plan, and what changes would most improve the downside case?">Review retirement</button>
+          <div id="summaryAskWelcome" class="summary-ask-welcome">
+            <p>DeepSeek receives the complete simulation input snapshot, monthly results table, plan events, and summary metrics. Your API key and scenario notes are never included.</p>
+            <div class="summary-ask-suggestions" aria-label="Suggested questions">
+              <button class="secondary" type="button" data-summary-question="Summarize my overall financial outlook, the strongest parts of the plan, and the three most important risks or actions.">Summarize my status</button>
+              <button class="secondary" type="button" data-summary-question="What causes the lowest median balance, and which cash flows or accounts contribute most to it?">Explain the low point</button>
+              <button class="secondary" type="button" data-summary-question="How resilient is my retirement plan, and what changes would most improve the downside case?">Review retirement</button>
+            </div>
           </div>
-          <label>Your question
-            <textarea id="summaryAskPrompt" rows="4" placeholder="Why is my lowest median balance $2,442 in 2028-01?"></textarea>
-          </label>
-          <div id="summaryAskStatus" class="smart-track-status" aria-live="polite"></div>
           <article id="summaryAskResult" class="summary-ask-result view-hidden" aria-live="polite">
             <div id="summaryAskConversation" class="summary-ask-conversation"></div>
             <div id="summaryAskFollowups" class="summary-ask-followups"></div>
           </article>
         </div>
-        <footer class="smart-track-actions">
-          <button id="cancelSummaryAsk" class="secondary" type="button">Close</button>
-          <button id="submitSummaryAsk" type="submit"><span aria-hidden="true">✦</span> Ask DeepSeek</button>
-        </footer>
+        <div class="summary-ask-composer">
+          <div id="summaryAskStatus" class="smart-track-status" aria-live="polite"></div>
+          <div class="summary-ask-input-row">
+            <label class="sr-only" for="summaryAskPrompt">Your question</label>
+            <textarea id="summaryAskPrompt" rows="2" placeholder="Ask a follow-up about your simulation…"></textarea>
+            <button id="submitSummaryAsk" type="submit"><span aria-hidden="true">✦</span><span>Ask DeepSeek</span></button>
+          </div>
+        </div>
       </form>
     </dialog>
 
@@ -317,7 +341,10 @@
               <span id="plotsExportStatus" class="small" role="status" aria-live="polite"></span>
             </div>
           </div>
-          <p id="plotsEmptyState" class="small">Run the simulation to see updated plots.</p>
+          <div id="plotsEmptyState" class="summary-empty">
+            <strong>No simulation results yet</strong>
+            <span>Run the simulation to generate your forecast plots.</span>
+          </div>
           <div id="plotsContent" class="view-hidden">
           <article id="balanceChartCard" class="chart-card">
             <div class="chart-heading">
@@ -428,7 +455,10 @@
               <span id="reportsExportStatus" class="small" role="status" aria-live="polite"></span>
             </div>
           </div>
-          <p id="reportsEmptyState" class="small">Run the simulation to see a detailed analysis of the results.</p>
+          <div id="reportsEmptyState" class="summary-empty">
+            <strong>No simulation results yet</strong>
+            <span>Run the simulation to generate your detailed reports.</span>
+          </div>
           <div id="reportsContent" class="view-hidden">
             <div id="reportsSummaryCards" class="report-cards"></div>
 

@@ -6,6 +6,7 @@ import { ACCOUNT_TYPE_LABELS } from './accounts.js';
 import { loanDownPaymentAmount, loanMonthlyPayment } from './blocks.js';
 import { buildSummaryQuestionPrompt, buildSummaryFollowUpPrompt, validateSummaryAnswer, requestDeepSeekConversation } from './deepseek.js';
 import { serializeState } from './persistence.js';
+import { showLoading, updateLoadingProgress, hideLoading, showLoadingError, withLoading } from './loading.js';
 
 const state = { accounts: null, blocks: null, globalReturnsSchedule: null, marketEvents: [] };
 let lastChartData = null;
@@ -121,11 +122,20 @@ async function main() {
     setTimeout(resizePlots, 50);
   }
 
-  navLinks.forEach(link => link.addEventListener('click', event => {
+  async function switchView(view, options) {
+    const normalizedView = view in VIEW_HASHES ? view : 'plan';
+    const label = VIEW_TITLES[normalizedView];
+    await withLoading(`Opening ${label}…`, async () => {
+      setActiveView(normalizedView, options);
+      await new Promise(resolve => requestAnimationFrame(resolve));
+    });
+  }
+
+  navLinks.forEach(link => link.addEventListener('click', async event => {
     event.preventDefault();
-    setActiveView(link.dataset.view);
+    await switchView(link.dataset.view);
   }));
-  window.addEventListener('hashchange', () => setActiveView(viewForHash(), { updateHash: false }));
+  window.addEventListener('hashchange', () => switchView(viewForHash(), { updateHash: false }));
   setActiveView(viewForHash(), { updateHash: false });
 
   const summaryAskDialog = document.getElementById('summaryAskDialog');
@@ -135,12 +145,18 @@ async function main() {
   const summaryAskResult = document.getElementById('summaryAskResult');
   const summaryAskConversation = document.getElementById('summaryAskConversation');
   const summaryAskFollowups = document.getElementById('summaryAskFollowups');
+  const summaryAskWelcome = document.getElementById('summaryAskWelcome');
+  const summaryAskContent = summaryAskDialog.querySelector('.summary-ask-content');
   let summaryConversationMessages = [];
   let summaryConversationTurns = [];
+  let summaryPendingQuestion = null;
+  let summaryPendingError = null;
 
   function resetSummaryConversation() {
     summaryConversationMessages = [];
     summaryConversationTurns = [];
+    summaryPendingQuestion = null;
+    summaryPendingError = null;
     summaryAskConversation.replaceChildren();
     summaryAskFollowups.replaceChildren();
     summaryAskResult.classList.add('view-hidden');
@@ -186,9 +202,28 @@ async function main() {
       return container;
     }));
 
+    if (summaryPendingQuestion || summaryPendingError) {
+      const pending = summaryPendingError || { question: summaryPendingQuestion };
+      const container = document.createElement('section');
+      container.className = 'summary-ask-turn';
+      const question = document.createElement('div');
+      question.className = 'summary-ask-question';
+      question.textContent = pending.question;
+      const answer = document.createElement('div');
+      if (summaryPendingError) {
+        answer.className = 'summary-ask-answer error';
+        answer.textContent = summaryPendingError.message;
+      } else {
+        answer.className = 'summary-ask-answer is-loading';
+        answer.innerHTML = '<span class="summary-ask-typing" aria-hidden="true"><i></i><i></i><i></i></span><span>DeepSeek is thinking…</span>';
+      }
+      container.append(question, answer);
+      summaryAskConversation.appendChild(container);
+    }
+
     summaryAskFollowups.replaceChildren();
     const latest = summaryConversationTurns.at(-1);
-    for (const followUp of latest?.result.followUpQuestions || []) {
+    for (const followUp of summaryPendingQuestion || summaryPendingError ? [] : latest?.result.followUpQuestions || []) {
       const button = document.createElement('button');
       button.type = 'button';
       button.textContent = followUp;
@@ -198,8 +233,10 @@ async function main() {
       });
       summaryAskFollowups.appendChild(button);
     }
-    summaryAskResult.classList.toggle('view-hidden', summaryConversationTurns.length === 0);
-    summaryAskConversation.lastElementChild?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    const hasConversation = summaryConversationTurns.length > 0 || summaryPendingQuestion || summaryPendingError;
+    summaryAskWelcome.classList.toggle('view-hidden', Boolean(hasConversation));
+    summaryAskResult.classList.toggle('view-hidden', !hasConversation);
+    requestAnimationFrame(() => { summaryAskContent.scrollTop = summaryAskContent.scrollHeight; });
   }
 
   function closeSummaryAsk() {
@@ -215,7 +252,6 @@ async function main() {
     summaryAskPrompt.focus();
   });
   document.getElementById('closeSummaryAsk').addEventListener('click', closeSummaryAsk);
-  document.getElementById('cancelSummaryAsk').addEventListener('click', closeSummaryAsk);
   document.getElementById('newSummaryConversation').addEventListener('click', () => {
     resetSummaryConversation();
     summaryAskPrompt.focus();
@@ -227,7 +263,8 @@ async function main() {
     });
   });
 
-  document.getElementById('runSim').addEventListener('click', () => {
+  document.getElementById('runSim').addEventListener('click', async () => {
+    const runButton = document.getElementById('runSim');
     const curAge = parseInt(document.getElementById('currentAge').value, 10);
     const retireAge = parseInt(document.getElementById('retireAge').value, 10);
     const numParticles = parseInt(document.getElementById('numParticles').value, 10) || 300;
@@ -265,7 +302,12 @@ async function main() {
       withdrawalOrder: state.withdrawalOrder || [],
     });
 
-    const out = sim.run();
+    runButton.disabled = true;
+    showLoading('Preparing simulation', { progress: true, detailText: 'Validating inputs' });
+    try {
+    const out = await sim.runAsync(({ percent, phase, detail }) => updateLoadingProgress(percent, phase, detail));
+    updateLoadingProgress(98, 'Rendering results', 'Updating charts, summary, and reports');
+    await new Promise(resolve => requestAnimationFrame(resolve));
     resetSummaryConversation();
 
     const labels = Array.from({ length: months }, (_, i) => {
@@ -342,6 +384,15 @@ async function main() {
       parts.push(`<span>${escapeHtml(event.name)} triggered: <b>${(event.triggerRate * 100).toFixed(1)}%</b> of paths</span>`);
     }
     summary.innerHTML = parts.join('');
+    updateLoadingProgress(100, 'Simulation complete', 'Results are ready');
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    } catch (error) {
+      console.error(error);
+      alert(error?.message || 'The simulation could not be completed.');
+    } finally {
+      runButton.disabled = false;
+      hideLoading();
+    }
   });
 
   function inflationFactorAt(monthIndex) {
@@ -621,7 +672,11 @@ async function main() {
     }
     submitButton.disabled = true;
     summaryAskStatus.classList.remove('error');
-    summaryAskStatus.textContent = 'Sending the simulation table to DeepSeek…';
+    summaryAskStatus.textContent = '';
+    summaryPendingQuestion = question;
+    summaryPendingError = null;
+    summaryAskPrompt.value = '';
+    renderSummaryConversation();
     try {
       let userContent;
       if (summaryConversationMessages.length === 0) {
@@ -636,14 +691,15 @@ async function main() {
       const result = validateSummaryAnswer(response.value);
       summaryConversationMessages = [...pendingMessages, { role: 'assistant', content: response.assistantContent }];
       summaryConversationTurns.push({ question, result });
-      summaryAskPrompt.value = '';
-      summaryAskStatus.textContent = '';
+      summaryPendingQuestion = null;
       renderSummaryConversation();
     } catch (error) {
-      summaryAskStatus.classList.add('error');
-      summaryAskStatus.textContent = error.message || 'Unable to analyze the simulation.';
+      summaryPendingQuestion = null;
+      summaryPendingError = { question, message: error.message || 'Unable to analyze the simulation.' };
+      renderSummaryConversation();
     } finally {
       submitButton.disabled = false;
+      summaryAskPrompt.focus();
     }
   });
 
@@ -863,21 +919,23 @@ async function main() {
       statusTimer = setTimeout(() => { statusEl.textContent = ''; }, 3000);
     };
 
-    document.getElementById(`${prefix}DownloadCsv`).addEventListener('click', () => {
+    document.getElementById(`${prefix}DownloadCsv`).addEventListener('click', async () => {
       if (!lastChartData) { setStatus('Run the simulation first.'); return; }
-      downloadTextFile('financial-simulation-results.csv', 'text/csv', currentResultsCsv());
+      await withLoading('Preparing CSV download…', async () => {
+        downloadTextFile('financial-simulation-results.csv', 'text/csv', currentResultsCsv());
+      });
       setStatus('Downloaded CSV.');
     });
 
     document.getElementById(`${prefix}CopyCsv`).addEventListener('click', async () => {
       if (!lastChartData) { setStatus('Run the simulation first.'); return; }
-      const ok = await copyToClipboard(currentResultsCsv());
+      const ok = await withLoading('Copying CSV…', () => copyToClipboard(currentResultsCsv()));
       setStatus(ok ? 'CSV copied to clipboard.' : 'Could not copy — try Download CSV instead.');
     });
 
     document.getElementById(`${prefix}CopyPython`).addEventListener('click', async () => {
       if (!lastChartData) { setStatus('Run the simulation first.'); return; }
-      const ok = await copyToClipboard(buildPythonSnippet(currentResultsCsv()));
+      const ok = await withLoading('Preparing Python export…', () => copyToClipboard(buildPythonSnippet(currentResultsCsv())));
       setStatus(ok ? 'Python (pandas + matplotlib) snippet copied to clipboard.' : 'Could not copy — try Download CSV instead.');
     });
   }
@@ -942,6 +1000,9 @@ async function main() {
   });
 }
 
-main();
+main().then(hideLoading).catch(error => {
+  console.error(error);
+  showLoadingError(error);
+});
 
 

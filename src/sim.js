@@ -243,7 +243,7 @@ class ParticleState {
 export class Simulator {
   constructor({
     startDate, months, accounts, blocks, globalReturnsSchedule,
-    city = 'Default', numParticles = 300, useParticleFilter = true,
+    city = 'Default', numParticles = 300, useParticleFilter = false,
     retirementMonthIndex = null, marketEvents = [],
     inflationRate = 0, capitalGains = null, withdrawalOrder = [],
     inflationModel = null, seed = '', random = null,
@@ -282,6 +282,24 @@ export class Simulator {
   }
 
   run() {
+    const steps = this._runSteps();
+    let step = steps.next();
+    while (!step.done) step = steps.next();
+    return step.value;
+  }
+
+  async runAsync(onProgress = null) {
+    const steps = this._runSteps();
+    let step = steps.next();
+    while (!step.done) {
+      onProgress?.(step.value);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      step = steps.next();
+    }
+    return step.value;
+  }
+
+  *_runSteps() {
     const { startDate, months, accounts, blocks, city } = this;
     const defaultChecking = firstAccountOfType(accounts, 'checking');
     const loans = precomputeLoans(blocks);
@@ -291,6 +309,8 @@ export class Simulator {
     // 1) Build N independent particles, each with its own noise draws for
     //    block amounts and its own resulting effective tax rates by year.
     let particles = [];
+    const particleProgressInterval = Math.max(1, Math.ceil(this.numParticles / 20));
+    yield { percent: 0, phase: 'Preparing simulation', detail: `Initializing ${this.numParticles.toLocaleString()} paths` };
     for (let i = 0; i < this.numParticles; i++) {
       const inflationFactors = buildInflationPath(months, this.inflationRate, this.inflationModel, this.random);
       const blockAmounts = precomputeBlockAmounts(blocks, startDate, months, inflationFactors, this.random);
@@ -310,6 +330,9 @@ export class Simulator {
         starts[occurrence.startIndex] = (starts[occurrence.startIndex] || 0) + 1;
       }
       particles.push(new ParticleState(balances, blockAmounts, effectiveRatesByYear, marketEventOccurrences, costBasis, [], inflationFactors));
+      if ((i + 1) % particleProgressInterval === 0 || i + 1 === this.numParticles) {
+        yield { percent: Math.round((i + 1) / this.numParticles * 20), phase: 'Preparing simulation', detail: `Initialized ${(i + 1).toLocaleString()} of ${this.numParticles.toLocaleString()} paths` };
+      }
     }
 
     const pf = new ParticleFilter(particles, { enabled: this.useParticleFilter, essThresholdFraction: 0.5, resamplePenalty: 0.02, random: this.random });
@@ -325,6 +348,7 @@ export class Simulator {
     let fireSuccessRate = null;
     let fireNumber = null;
 
+    const monthProgressInterval = Math.max(1, Math.ceil(months / 100));
     for (let m = 0; m < months; m++) {
       const date = monthIndex(startDate, m);
       const year = date.getFullYear();
@@ -447,8 +471,12 @@ export class Simulator {
       pf.updateWeights(p => p.hasShortfall ? -1 : p.total());
       const resampled = pf.maybeResample(p => p.clone());
       if (resampled) resampleEvents++;
+      if ((m + 1) % monthProgressInterval === 0 || m + 1 === months) {
+        yield { percent: 20 + Math.round((m + 1) / months * 75), phase: 'Running simulation', detail: `Month ${(m + 1).toLocaleString()} of ${months.toLocaleString()}` };
+      }
     }
 
+    yield { percent: 96, phase: 'Finalizing results', detail: 'Aggregating outcomes and risk measures' };
     const finalTotals = pf.particles.map(p => p.total());
     const startingNetWorth = Object.values(accounts).reduce((sum, account) => sum + Number(account.balance || 0), 0);
     const bankruptCount = pf.particles.filter((p, index) => p.hasShortfall || finalTotals[index] < 0).length;

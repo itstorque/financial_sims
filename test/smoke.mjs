@@ -153,6 +153,12 @@ const blocks = [
   createBlock({ category: 'expense', kind: 'one-time', description: 'New car', amount: 20000, startMonth: '2026-06', sourceAccountId: 'checking' }),
 ];
 
+const defaultSim = new Simulator({
+  startDate: '2026-01-01', months: 1, accounts, blocks,
+  globalReturnsSchedule: defaultReturnsSchedule(),
+});
+assert(defaultSim.useParticleFilter === false, 'simulator never conditions paths on solvency by default');
+
 const sim = new Simulator({
   startDate: '2026-01-01',
   months: 36,
@@ -165,6 +171,16 @@ const sim = new Simulator({
   retirementMonthIndex: 24,
 });
 const out = sim.run();
+
+const asyncProgress = [];
+const asyncOut = await new Simulator({
+  startDate: '2026-01-01', months: 3, accounts, blocks,
+  globalReturnsSchedule: defaultReturnsSchedule(), numParticles: 3,
+  seed: 'async-progress-test',
+}).runAsync(update => asyncProgress.push(update));
+assert(asyncOut.timeline.length === 3, 'async simulation runner returns complete results');
+assert(asyncProgress.length > 2 && asyncProgress[0].percent === 0 && asyncProgress.at(-1).percent >= 95, 'async simulation runner reports real phased progress');
+assert(asyncProgress.every((update, index) => index === 0 || update.percent >= asyncProgress[index - 1].percent), 'async simulation progress never moves backward');
 
 assert(out.timeline.length === 36, 'timeline has one entry per month');
 assert(out.assetOnlyTimeline.length === 36, 'asset-only timeline has one entry per month');

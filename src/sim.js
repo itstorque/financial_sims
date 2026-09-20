@@ -269,6 +269,8 @@ export class Simulator {
     const timeline = []; // per month: {p10,p50,p90,mean}
     const byAccountTypeTimeline = []; // per month: {checking,hysa,taxable,retirement,debt}
     const byAccountTimeline = []; // per month: mean balance keyed by account id
+    const retirementReadinessTimeline = []; // per month: FIRE target + share of paths above it
+    let maximumDebt = 0;
     let resampleEvents = 0;
     let fireSuccessRate = null;
     let fireNumber = null;
@@ -353,9 +355,18 @@ export class Simulator {
       const mean = totals.reduce((a, b) => a + b, 0) / totals.length;
       timeline.push({ p10: percentile(totals, 0.10), p50: percentile(totals, 0.50), p90: percentile(totals, 0.90), mean });
 
+      const monthlyFireNumber = this._fireNumberAt(m);
+      retirementReadinessTimeline.push({
+        fireNumber: monthlyFireNumber,
+        successRate: totals.filter(value => value >= monthlyFireNumber).length / totals.length,
+      });
+
       const typeSums = { checking: 0, hysa: 0, taxable: 0, retirement: 0, roth: 0, debt: 0 };
       const accountSums = Object.fromEntries(Object.keys(accounts).map(id => [id, 0]));
       for (const p of pf.particles) {
+        const debt = Object.entries(accounts).reduce((sum, [id, account]) =>
+          account.type === 'debt' ? sum + Math.max(0, -(p.accountBalances[id] || 0)) : sum, 0);
+        maximumDebt = Math.max(maximumDebt, debt);
         for (const [id, acc] of Object.entries(accounts)) {
           const meanContribution = p.accountBalances[id] / pf.particles.length;
           typeSums[acc.type] = (typeSums[acc.type] || 0) + meanContribution;
@@ -392,7 +403,11 @@ export class Simulator {
       timeline,
       byAccountTypeTimeline,
       byAccountTimeline,
+      retirementReadinessTimeline,
       solvencyRate,
+      bankruptcyCount: bankruptCount,
+      particleCount: this.numParticles,
+      maximumDebt,
       resampleEvents,
       fireStats,
       marketEventStats: this.marketEvents.map(event => ({

@@ -10,6 +10,7 @@ import { createScenarioExport, reviveScenarioExport, serializeState, reviveState
 import { childCostAmountSchedule, SF_CHILD_COST_BRACKETS } from '../src/childCostModel.js';
 import { buildBaseScenario, BASE_SCENARIO_NAME } from '../src/baseScenario.js';
 import { createMarketEvent, sampleMarketEvents, eventAppliesToAccount } from '../src/marketEvents.js';
+import { accountColumnKey, buildResultsDataFrameRows, rowsToCsv, buildPythonSnippet } from '../src/exportData.js';
 
 let failures = 0;
 function assert(cond, msg) {
@@ -89,6 +90,11 @@ assert(Object.keys(out.byAccountTimeline[0]).length === Object.keys(accounts).le
 assert(out.individualTraces.length === 50, 'simulation exposes up to 50 representative individual paths');
 assert(out.individualTraces.every(trace => trace.length === 36), 'every individual path spans the full simulation');
 assert(out.individualTraces.every((trace, index) => trace.at(-1) === out.finalParticles[index].total()), 'individual path endpoints match final particle values');
+assert(out.bankruptcyCount >= 0 && out.bankruptcyCount <= 50, 'summary exposes a valid bankruptcy count');
+assert(out.particleCount === 50, 'summary exposes the simulated path count');
+assert(out.maximumDebt >= 0, 'summary exposes maximum debt as a non-negative amount');
+assert(out.retirementReadinessTimeline.length === 36, 'summary exposes retirement readiness for every month');
+assert(out.retirementReadinessTimeline.every(point => point.successRate >= 0 && point.successRate <= 1), 'retirement readiness probabilities stay in range');
 
 // --- Cross-account drawdown ---
 const drawdownAccounts = {
@@ -360,6 +366,57 @@ assert(baseOut.timeline.length === 24, 'base scenario simulates without throwing
   // but the mechanism must not throw and must still track a valid (non-negative) balance.
   assert(gainsOut.timeline.length === 12, 'capital-gains-enabled simulation runs to completion without throwing');
   assert(gainsOut.byAccountTypeTimeline.at(-1).taxable <= 50000, 'capital-gains-enabled simulation still draws down the taxable account as expected');
+}
+
+// --- exportData.js: CSV / pandas-DataFrame / matplotlib snippet builders ---
+{
+  const used = new Set();
+  assert(accountColumnKey('Checking', used) === 'acct_Checking', 'accountColumnKey sanitizes a simple name');
+  assert(accountColumnKey('Savings (HYSA)', new Set()) === 'acct_Savings_HYSA', 'accountColumnKey strips non-alphanumeric characters');
+  const dupeUsed = new Set();
+  const first = accountColumnKey('My Fund', dupeUsed);
+  const second = accountColumnKey('My Fund', dupeUsed);
+  assert(first !== second, 'accountColumnKey de-duplicates repeated names with a numeric suffix');
+
+  const exportAccounts = {
+    checking: { id: 'checking', name: 'Checking' },
+    hysa: { id: 'hysa', name: 'Savings (HYSA)' },
+  };
+  const labels = ['2026-01', '2026-02', '2026-03'];
+  const series = { p10: [100, 110, 120], p50: [200, 210, 220], p90: [300, 310, 320], mean: [205, 215, 225] };
+  const byAccountTimeline = [
+    { checking: 150, hysa: 50 },
+    { checking: 155, hysa: 55 },
+    { checking: 160, hysa: 60 },
+  ];
+  const rows = buildResultsDataFrameRows(labels, series, byAccountTimeline, exportAccounts);
+  assert(rows.length === 3, 'buildResultsDataFrameRows produces one row per month');
+  assert(rows[0].month === '2026-01' && rows[0].p10 === 100 && rows[0].p50 === 200 && rows[0].p90 === 300 && rows[0].mean === 205, 'buildResultsDataFrameRows preserves the percentile/mean series values');
+  assert(rows[1].acct_Checking === 155 && rows[1].acct_Savings_HYSA === 55, 'buildResultsDataFrameRows attaches a per-account column for each account');
+
+  const csv = rowsToCsv(rows);
+  const csvLines = csv.split('\n');
+  assert(csvLines[0] === 'month,p10,p50,p90,mean,acct_Checking,acct_Savings_HYSA', 'rowsToCsv writes the expected header row');
+  assert(csvLines.length === 4, 'rowsToCsv writes one header row + one row per month');
+  assert(csvLines[1] === '2026-01,100,200,300,205,150,50', 'rowsToCsv writes numeric values without quoting');
+  assert(rowsToCsv([]) === '', 'rowsToCsv returns an empty string for zero rows');
+
+  const commaRows = buildResultsDataFrameRows(['2026-01'], { p10: [1], p50: [2], p90: [3], mean: [4] }, [{ a: 5 }], { a: { id: 'a', name: 'Roth, IRA' } });
+  const commaCsv = rowsToCsv(commaRows);
+  assert(commaCsv.includes('"acct_Roth_IRA"') === false, 'sanitized account column names never need CSV quoting (non-alphanumeric chars are stripped)');
+
+  const snippet = buildPythonSnippet(csv);
+  assert(snippet.includes('import pandas as pd') && snippet.includes('import matplotlib.pyplot as plt'), 'buildPythonSnippet imports pandas and matplotlib');
+  assert(snippet.includes('base64.b64decode'), 'buildPythonSnippet decodes the embedded base64 CSV payload');
+  assert(snippet.includes('pd.read_csv'), 'buildPythonSnippet reconstructs a DataFrame from the embedded CSV');
+  assert(snippet.includes('startswith("acct_")'), 'buildPythonSnippet filters account columns by their acct_ prefix for the composition plot');
+  assert(!snippet.includes(csv), 'buildPythonSnippet embeds the CSV as base64, not as raw literal text (avoids any quoting/escaping hazards)');
+
+  // Round-trip: decode the embedded base64 payload exactly as the generated Python does, and confirm it matches the original CSV byte-for-byte.
+  const b64Match = snippet.match(/_csv_b64 = """\n([\s\S]*?)\n"""/);
+  assert(b64Match !== null, 'buildPythonSnippet embeds a recognizable triple-quoted base64 block');
+  const decoded = Buffer.from(b64Match[1].replace(/\n/g, ''), 'base64').toString('utf8');
+  assert(decoded === csv, 'the base64 payload embedded in the Python snippet decodes back to the exact original CSV');
 }
 
 console.log(failures === 0 ? '\nAll smoke tests passed.' : `\n${failures} smoke test(s) FAILED.`);

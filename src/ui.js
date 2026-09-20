@@ -5,7 +5,7 @@
 // "Run Simulation" time.
 
 import { Account, ACCOUNT_TYPES, ACCOUNT_TYPE_LABELS, nextAccountId } from './accounts.js';
-import { createBlock, createLoanBlock, AmountSchedule, buildScheduleClips, spliceScheduleClip, loanDownPaymentAmount, loanPrincipal, loanMonthlyPayment } from './blocks.js';
+import { createBlock, createLoanBlock, AmountSchedule, buildScheduleClips, spliceScheduleClip, loanDownPaymentAmount, loanPrincipal, loanMonthlyPayment, loanPaymentWindow } from './blocks.js';
 import { ReturnsSchedule } from './returnsSchedule.js';
 import { cities } from './taxes.js';
 import { maxHomePrice } from './affordability.js';
@@ -106,6 +106,10 @@ export async function initUI(state) {
   const editorDetail = document.getElementById('editorDetail');
   const editorBlockCount = document.getElementById('editorBlockCount');
   const editorState = { blockId: null, clipIndex: 0, timelineScrollLeft: 0 };
+  const trackEditor = document.getElementById('trackEditor');
+  const trackEditorBody = document.getElementById('trackEditorBody');
+  const trackInspector = document.getElementById('trackInspector');
+  const trackState = { blockId: null, clipIndex: null, scrollLeft: 0, pixelsPerMonth: 5, pendingCenterRatio: null, scissorsMode: false };
 
   for (const c of cities()) {
     const opt = document.createElement('option');
@@ -425,6 +429,298 @@ export async function initUI(state) {
   document.getElementById('editorAddExpense').addEventListener('click', () => addEditorBlock('expense'));
   blockEditor.addEventListener('click', event => { if (event.target === blockEditor) closeBlockEditor(); });
   blockEditor.addEventListener('close', () => renderBlocks());
+
+  function trackBlocks() {
+    return state.blocks.filter(block => block.kind === 'continuous' || block.kind === 'loan');
+  }
+
+  function clipsForTrack(block, window) {
+    if (block.kind === 'loan') {
+      const [, paymentTo] = loanPaymentWindow(block);
+      const entries = [
+        { from: block.startMonth, to: block.startMonth, name: 'Purchase + down payment', annualAmount: loanDownPaymentAmount(block) + loanMonthlyPayment(block) },
+      ];
+      const recurringFrom = nextMonthKey(block.startMonth);
+      if (recurringFrom <= paymentTo) entries.push({ from: recurringFrom, to: paymentTo, name: 'Mortgage payments', annualAmount: loanMonthlyPayment(block) * 12 });
+      return buildScheduleClips(entries, window.from, window.to);
+    }
+    const source = block.useCustomSchedule
+      ? block.amountSchedule.entries
+      : [{ from: block.startMonth || window.from, to: block.endMonth || window.to, name: block.description, annualAmount: block.amount }];
+    return buildScheduleClips(source, window.from, window.to);
+  }
+
+  function selectedTrack() {
+    const block = state.blocks.find(item => item.id === trackState.blockId);
+    if (!block || trackState.clipIndex == null) return null;
+    const clips = clipsForTrack(block, simulationWindow());
+    return { block, clips, clip: clips[trackState.clipIndex] };
+  }
+
+  function trackCostLine(clips, window, totalMonths, timelineWidth, tone) {
+    const maxAmount = Math.max(1, ...clips.map(clip => Math.abs(Number(clip.annualAmount) || 0)));
+    const points = [];
+    for (const clip of clips) {
+      const start = Math.max(0, keyToIdx(clip.from) - keyToIdx(window.from));
+      const end = Math.min(totalMonths, keyToIdx(clip.to) - keyToIdx(window.from) + 1);
+      const x1 = start / totalMonths * timelineWidth;
+      const x2 = end / totalMonths * timelineWidth;
+      const amount = Math.abs(Number(clip.annualAmount) || 0);
+      const y = 49 - amount / maxAmount * 39;
+      if (points.length) points.push(`${x1},${points.at(-1).split(',')[1]}`, `${x1},${y}`);
+      else points.push(`${x1},${y}`);
+      points.push(`${x2},${y}`);
+    }
+    return `<svg class="track-cost-line ${tone}" viewBox="0 0 ${timelineWidth} 54" preserveAspectRatio="none" aria-hidden="true" data-peak="${escapeHtml(formatCompactMoney(maxAmount))}"><polyline points="${points.join(' ')}"/><line x1="0" y1="49" x2="${timelineWidth}" y2="49"/></svg>`;
+  }
+
+  function trackYearTicks(window, totalMonths) {
+    const start = keyToIdx(window.from);
+    const end = keyToIdx(window.to);
+    const firstYear = Math.ceil(start / 12);
+    const ticks = [];
+    for (let year = firstYear; year * 12 <= end; year++) {
+      const offset = year * 12 - start;
+      ticks.push(`<span class="track-year-tick" style="left:${offset / totalMonths * 100}%"><b>${year}</b></span>`);
+    }
+    return ticks.join('');
+  }
+
+  function renderTrackInspector() {
+    const selection = selectedTrack();
+    if (!selection?.clip) {
+      trackInspector.innerHTML = '<div class="track-inspector-empty">Select a clip to edit its condition or splice it.</div>';
+      return;
+    }
+    const { block, clip, clips } = selection;
+    if (block.kind === 'loan') {
+      const downPayment = loanDownPaymentAmount(block);
+      const monthlyPayment = loanMonthlyPayment(block);
+      trackInspector.innerHTML = `
+        <div class="track-inspector-title">
+          <div><span class="track-kind loan">purchase</span><strong>${escapeHtml(block.description)}</strong></div>
+          <span>${block.startMonth} · ${block.termYears}-year loan</span>
+        </div>
+        <div class="track-loan-summary">
+          <span>Purchase <b>${formatCompactMoney(block.purchasePrice)}</b></span>
+          <span>Down payment <b>${formatCompactMoney(downPayment)}</b></span>
+          <span>Monthly mortgage <b>${formatCompactMoney(monthlyPayment)}</b></span>
+          <span>Annual payments <b>${formatCompactMoney(monthlyPayment * 12)}</b></span>
+          <button id="trackOpenDetail" class="secondary" type="button">Open loan editor</button>
+        </div>`;
+      document.getElementById('trackOpenDetail').addEventListener('click', () => {
+        trackEditor.close();
+        openBlockEditor(block.id);
+      });
+      return;
+    }
+    const canSplice = clip.from !== clip.to;
+    const splitDefault = canSplice ? nextMonthKey(clip.from) : clip.from;
+    trackInspector.innerHTML = `
+      <div class="track-inspector-title">
+        <div><span class="track-kind ${block.category}">${block.category}</span><strong>${escapeHtml(block.description)}</strong></div>
+        <span>${clip.from} → ${clip.to}</span>
+      </div>
+      <div class="track-inspector-fields">
+        <label>Condition name <input id="trackClipName" value="${escapeHtml(clip.name)}"/></label>
+        <label>Annual amount $ <input id="trackClipAmount" type="number" value="${clip.annualAmount}"/></label>
+        <label>Splice at <input id="trackSpliceMonth" type="month" min="${nextMonthKey(clip.from)}" max="${clip.to}" value="${splitDefault}" ${canSplice ? '' : 'disabled'}/></label>
+        <button id="trackSplice" type="button" ${canSplice ? '' : 'disabled'}>✂ Splice</button>
+        <button id="trackPause" class="secondary" type="button">Pause ($0)</button>
+        <button id="trackOpenDetail" class="secondary" type="button">Open detail editor</button>
+      </div>`;
+
+    const commitClips = () => {
+      block.amountSchedule = new AmountSchedule(clips);
+      block.useCustomSchedule = true;
+      renderTrackEditor();
+    };
+    document.getElementById('trackClipName').addEventListener('change', event => {
+      clip.name = event.target.value.trim() || `Clip ${trackState.clipIndex + 1}`;
+      commitClips();
+    });
+    document.getElementById('trackClipAmount').addEventListener('change', event => {
+      clip.annualAmount = parseFloat(event.target.value || 0);
+      commitClips();
+    });
+    document.getElementById('trackSplice').addEventListener('click', () => {
+      if (!spliceScheduleClip(clips, trackState.clipIndex, document.getElementById('trackSpliceMonth').value)) return;
+      block.amountSchedule = new AmountSchedule(clips);
+      block.useCustomSchedule = true;
+      trackState.clipIndex += 1;
+      renderTrackEditor();
+    });
+    document.getElementById('trackPause').addEventListener('click', () => {
+      clip.name = 'Paused';
+      clip.annualAmount = 0;
+      commitClips();
+    });
+    document.getElementById('trackOpenDetail').addEventListener('click', () => {
+      trackEditor.close();
+      openBlockEditor(block.id);
+    });
+  }
+
+  function renderTrackEditor() {
+    const window = simulationWindow();
+    const blocks = trackBlocks();
+    const totalMonths = keyToIdx(window.to) - keyToIdx(window.from) + 1;
+    const pixelsPerMonth = trackState.pixelsPerMonth;
+    const timelineWidth = Math.max(1, totalMonths * pixelsPerMonth);
+    document.getElementById('trackWindowLabel').textContent = `${window.from} → ${window.to}`;
+    document.getElementById('trackZoomLevel').textContent = `${Math.round(pixelsPerMonth / 5 * 100)}%`;
+    document.getElementById('trackZoomOut').disabled = pixelsPerMonth <= 0.25;
+    document.getElementById('trackZoomIn').disabled = pixelsPerMonth >= 20;
+    const scissorsButton = document.getElementById('trackScissors');
+    scissorsButton.classList.toggle('active', trackState.scissorsMode);
+    scissorsButton.setAttribute('aria-pressed', String(trackState.scissorsMode));
+    scissorsButton.title = trackState.scissorsMode ? 'Exit splice mode' : 'Splice by clicking a track';
+    if (!blocks.length) {
+      trackEditorBody.innerHTML = '<div class="editor-empty"><h3>No recurring cash flows</h3><p>Add an income or expense to see it as a track.</p></div>';
+      renderTrackInspector();
+      return;
+    }
+    trackEditorBody.innerHTML = `
+      <div class="track-labels">
+        <div class="track-corner">Cash flow</div>
+        ${blocks.map(block => `<button class="track-label" data-track-detail="${escapeHtml(block.id)}" type="button"><span class="track-kind ${block.kind === 'loan' ? 'loan' : block.category}">${block.kind === 'loan' ? 'purchase' : block.category}</span><strong>${escapeHtml(block.description)}</strong><small>${block.kind === 'loan' ? `${formatCompactMoney(loanDownPaymentAmount(block))} down · ${formatCompactMoney(loanMonthlyPayment(block))}/mo` : block.useCustomSchedule ? 'clip schedule' : 'simple recurring'}</small></button>`).join('')}
+      </div>
+      <div class="track-scroll">
+        <div class="track-timeline ${trackState.scissorsMode ? 'is-cutting' : ''}" style="width:${timelineWidth}px">
+          <div class="track-ruler"><span class="track-range-start">${window.from}</span><div class="track-year-axis">${trackYearTicks(window, totalMonths)}</div><span class="track-range-end">${window.to}</span></div>
+          ${blocks.map(block => {
+            const clips = clipsForTrack(block, window);
+            const tone = block.kind === 'loan' ? 'loan' : block.category;
+            const costLine = trackCostLine(clips, window, totalMonths, timelineWidth, tone);
+            return `<div class="track-row ${block.kind === 'loan' ? 'loan' : ''}" data-track-id="${escapeHtml(block.id)}">${clips.map((clip, index) => {
+              const months = keyToIdx(clip.to) - keyToIdx(clip.from) + 1;
+              const width = months / totalMonths * 100;
+              const selected = block.id === trackState.blockId && index === trackState.clipIndex;
+              const paused = clip.annualAmount === 0;
+              const unit = block.kind === 'loan' && clip.name.includes('Purchase') ? ' purchase month' : '/yr';
+              return `<button class="track-clip ${block.kind === 'loan' ? 'loan' : block.category} ${paused ? 'paused' : ''} ${selected ? 'selected' : ''}" style="width:${width}%" data-track-block="${escapeHtml(block.id)}" data-track-clip="${index}" type="button" title="${escapeHtml(clip.name)} · ${clip.from} → ${clip.to} · ${formatCompactMoney(clip.annualAmount)}${unit}"><strong>${escapeHtml(clip.name)}</strong><small>${paused ? '$0' : `${formatCompactMoney(clip.annualAmount)}${unit}`}</small></button>`;
+            }).join('')}${costLine}</div>`;
+          }).join('')}
+          <div class="track-hover-guide" hidden><span></span><time></time></div>
+          <div class="track-cut-guide" hidden><span>✂</span><time></time></div>
+        </div>
+      </div>`;
+    const scroll = trackEditorBody.querySelector('.track-scroll');
+    if (trackState.pendingCenterRatio != null) {
+      scroll.scrollLeft = Math.max(0, trackState.pendingCenterRatio * timelineWidth - scroll.clientWidth / 2);
+      trackState.pendingCenterRatio = null;
+      trackState.scrollLeft = scroll.scrollLeft;
+    } else {
+      scroll.scrollLeft = trackState.scrollLeft;
+    }
+    scroll.addEventListener('scroll', () => { trackState.scrollLeft = scroll.scrollLeft; }, { passive: true });
+    trackEditorBody.querySelectorAll('[data-track-block]').forEach(button => {
+      button.addEventListener('click', () => {
+        if (trackState.scissorsMode) return;
+        trackState.scrollLeft = scroll.scrollLeft;
+        trackState.blockId = button.dataset.trackBlock;
+        trackState.clipIndex = Number(button.dataset.trackClip);
+        renderTrackEditor();
+      });
+    });
+    const timeline = trackEditorBody.querySelector('.track-timeline');
+    const cutGuide = trackEditorBody.querySelector('.track-cut-guide');
+    const hoverGuide = trackEditorBody.querySelector('.track-hover-guide');
+    const timelinePoint = event => {
+      const row = event.target.closest('.track-row');
+      if (!row) return null;
+      const rect = timeline.getBoundingClientRect();
+      const x = Math.min(timelineWidth, Math.max(0, event.clientX - rect.left));
+      const monthOffset = Math.min(totalMonths - 1, Math.max(0, Math.floor(x / timelineWidth * totalMonths)));
+      return { row, x, month: idxToKey(keyToIdx(window.from) + monthOffset) };
+    };
+    const pointAtEvent = event => {
+      const basePoint = timelinePoint(event);
+      const clipButton = event.target.closest('[data-track-block]');
+      if (!trackState.scissorsMode || !basePoint || !clipButton) return null;
+      const block = state.blocks.find(item => item.id === clipButton.dataset.trackBlock);
+      if (!block || block.kind === 'loan') return null;
+      return { ...basePoint, clipButton, block };
+    };
+    timeline.addEventListener('pointermove', event => {
+      const hoverPoint = timelinePoint(event);
+      if (hoverPoint) {
+        hoverGuide.hidden = false;
+        hoverGuide.style.left = `${hoverPoint.x}px`;
+        hoverGuide.querySelector('time').textContent = hoverPoint.month;
+      } else {
+        hoverGuide.hidden = true;
+      }
+      const point = pointAtEvent(event);
+      if (!point) { cutGuide.hidden = true; return; }
+      cutGuide.hidden = false;
+      cutGuide.style.left = `${point.x}px`;
+      cutGuide.style.top = `${point.row.offsetTop}px`;
+      cutGuide.querySelector('time').textContent = point.month;
+    });
+    timeline.addEventListener('pointerleave', () => { cutGuide.hidden = true; hoverGuide.hidden = true; });
+    timeline.addEventListener('click', event => {
+      const point = pointAtEvent(event);
+      if (!point) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const clips = clipsForTrack(point.block, window);
+      const clipIndex = Number(point.clipButton.dataset.trackClip);
+      const clip = clips[clipIndex];
+      if (!clip || clip.from === clip.to) return;
+      const splitMonth = point.month <= clip.from ? nextMonthKey(clip.from) : point.month > clip.to ? clip.to : point.month;
+      if (!spliceScheduleClip(clips, clipIndex, splitMonth)) return;
+      point.block.amountSchedule = new AmountSchedule(clips);
+      point.block.useCustomSchedule = true;
+      trackState.blockId = point.block.id;
+      trackState.clipIndex = clipIndex + 1;
+      trackState.scrollLeft = scroll.scrollLeft;
+      renderTrackEditor();
+    }, true);
+    trackEditorBody.querySelectorAll('[data-track-detail]').forEach(button => {
+      button.addEventListener('click', () => {
+        trackEditor.close();
+        openBlockEditor(button.dataset.trackDetail);
+      });
+    });
+    renderTrackInspector();
+  }
+
+  document.getElementById('openTrackEditor').addEventListener('click', () => {
+    trackState.blockId = null;
+    trackState.clipIndex = null;
+    trackState.scrollLeft = 0;
+    trackState.pixelsPerMonth = 5;
+    trackState.pendingCenterRatio = null;
+    trackState.scissorsMode = false;
+    renderTrackEditor();
+    trackEditor.showModal();
+  });
+  function changeTrackZoom(nextPixelsPerMonth) {
+    const scroll = trackEditorBody.querySelector('.track-scroll');
+    const timeline = trackEditorBody.querySelector('.track-timeline');
+    if (scroll && timeline) {
+      trackState.pendingCenterRatio = Math.min(1, Math.max(0, (scroll.scrollLeft + scroll.clientWidth / 2) / timeline.offsetWidth));
+    }
+    trackState.pixelsPerMonth = Math.min(20, Math.max(0.25, nextPixelsPerMonth));
+    renderTrackEditor();
+  }
+  document.getElementById('trackZoomOut').addEventListener('click', () => changeTrackZoom(trackState.pixelsPerMonth / 1.5));
+  document.getElementById('trackZoomIn').addEventListener('click', () => changeTrackZoom(trackState.pixelsPerMonth * 1.5));
+  document.getElementById('trackZoomFit').addEventListener('click', () => {
+    const scroll = trackEditorBody.querySelector('.track-scroll');
+    const totalMonths = keyToIdx(simulationWindow().to) - keyToIdx(simulationWindow().from) + 1;
+    trackState.pendingCenterRatio = 0.5;
+    trackState.pixelsPerMonth = Math.min(20, Math.max(0.25, (scroll?.clientWidth || 900) / totalMonths));
+    renderTrackEditor();
+  });
+  document.getElementById('trackScissors').addEventListener('click', () => {
+    trackState.scissorsMode = !trackState.scissorsMode;
+    renderTrackEditor();
+  });
+  document.getElementById('closeTrackEditor').addEventListener('click', () => trackEditor.close());
+  trackEditor.addEventListener('click', event => { if (event.target === trackEditor) trackEditor.close(); });
+  trackEditor.addEventListener('close', () => renderBlocks());
 
   function renderSegmentRows(entries, container, onChange) {
     container.innerHTML = '';

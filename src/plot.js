@@ -36,13 +36,30 @@ function geometricTicks(length, maxTicks = 8) {
   return [...ticks].sort((a, b) => a - b);
 }
 
-function axes(labels, scaleMode) {
+function themeColors() {
+  const styles = getComputedStyle(document.documentElement);
+  const color = name => styles.getPropertyValue(name).trim();
+  return {
+    accent: color('--accent'),
+    accentSoft: color('--plot-accent-soft'),
+    band: color('--plot-band'),
+    card: color('--card'),
+    danger: color('--danger'),
+    ink: color('--ink'),
+    muted: color('--muted'),
+    path: color('--plot-path'),
+    grid: color('--plot-grid'),
+    axis: color('--plot-axis'),
+  };
+}
+
+function axes(labels, scaleMode, colors) {
   const { logX, logY } = scaleModes(scaleMode);
   const xaxis = {
     type: logX ? 'log' : 'date',
-    gridcolor: 'rgba(101,112,124,.10)',
-    linecolor: '#d6d9de',
-    tickfont: { color: '#65707c', size: 10 },
+    gridcolor: colors.grid,
+    linecolor: colors.axis,
+    tickfont: { color: colors.muted, size: 10 },
     fixedrange: false,
     rangeslider: { visible: false },
   };
@@ -54,9 +71,9 @@ function axes(labels, scaleMode) {
   }
   const yaxis = {
     type: logY ? 'log' : 'linear',
-    gridcolor: 'rgba(101,112,124,.13)',
-    linecolor: '#d6d9de',
-    tickfont: { color: '#65707c', size: 10 },
+    gridcolor: colors.grid,
+    linecolor: colors.axis,
+    tickfont: { color: colors.muted, size: 10 },
     tickprefix: '$',
     tickformat: '~s',
     nticks: logY ? 6 : 8,
@@ -65,7 +82,7 @@ function axes(labels, scaleMode) {
   return { xaxis, yaxis, logX, logY };
 }
 
-function eventDecorations(labels, marketEventStats, logX) {
+function eventDecorations(labels, marketEventStats, logX, colors) {
   const markers = (marketEventStats || []).flatMap(event => (event.triggerMonths || []).map(trigger => ({ ...trigger, name: event.name })));
   const visible = markers.filter(marker => marker.monthIndex >= 0 && marker.monthIndex < labels.length);
   return {
@@ -88,29 +105,31 @@ function eventDecorations(labels, marketEventStats, logX) {
       textangle: -90,
       showarrow: false,
       xanchor: 'left',
-      font: { color: '#a92330', size: 9 },
+      font: { color: colors.danger, size: 9 },
     })),
   };
 }
 
 function commonLayout(element, labels, scaleMode, marketEventStats) {
-  const { xaxis, yaxis, logX, logY } = axes(labels, scaleMode);
-  const events = eventDecorations(labels, marketEventStats, logX);
+  const colors = themeColors();
+  const { xaxis, yaxis, logX, logY } = axes(labels, scaleMode, colors);
+  const events = eventDecorations(labels, marketEventStats, logX, colors);
   return {
     autosize: true,
     margin: { l: 64, r: 18, t: 36, b: 44 },
-    paper_bgcolor: '#fff',
-    plot_bgcolor: '#fff',
+    paper_bgcolor: colors.card,
+    plot_bgcolor: colors.card,
+    font: { color: colors.ink },
     hovermode: 'x unified',
     dragmode: 'pan',
     uirevision: `${element.id}:${scaleMode}`,
-    legend: { orientation: 'h', x: 0, y: 1.12, font: { color: '#65707c', size: 10 } },
+    legend: { orientation: 'h', x: 0, y: 1.12, font: { color: colors.muted, size: 10 } },
     xaxis,
     yaxis,
     shapes: events.shapes,
     annotations: events.annotations,
     transition: { duration: 0 },
-    meta: { logX, logY },
+    meta: { logX, logY, colors },
   };
 }
 
@@ -134,15 +153,15 @@ export function renderBalanceChart(element, labels, median, p10, p90, scaleMode 
     customdata,
     type: 'scatter',
     mode: 'lines',
-    line: { color: 'rgba(92,98,118,.20)', width: .75 },
+    line: { color: layout.meta.colors.path, width: .75 },
     hovertemplate,
     showlegend: false,
   }));
   const traces = [
     ...pathTraces,
-    { name: 'P10', x, y: p10, customdata, type: 'scatter', mode: 'lines', line: { color: 'rgba(37,99,168,.30)', width: 1 }, hovertemplate },
-    { name: 'P90', x, y: p90, customdata, type: 'scatter', mode: 'lines', line: { color: 'rgba(37,99,168,.30)', width: 1 }, fill: 'tonexty', fillcolor: 'rgba(37,99,168,.09)', hovertemplate },
-    { name: 'Median', x, y: median, customdata, type: 'scatter', mode: 'lines', line: { color: '#2563a8', width: 2 }, hovertemplate },
+    { name: 'P10', x, y: p10, customdata, type: 'scatter', mode: 'lines', line: { color: layout.meta.colors.accentSoft, width: 1 }, hovertemplate },
+    { name: 'P90', x, y: p90, customdata, type: 'scatter', mode: 'lines', line: { color: layout.meta.colors.accentSoft, width: 1 }, fill: 'tonexty', fillcolor: layout.meta.colors.band, hovertemplate },
+    { name: 'Median', x, y: median, customdata, type: 'scatter', mode: 'lines', line: { color: layout.meta.colors.accent, width: 2 }, hovertemplate },
   ];
   return Plotly.react(element, traces, layout, PLOT_CONFIG);
 }

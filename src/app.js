@@ -4,6 +4,8 @@ import { renderBalanceChart, renderCompositionChart } from './plot.js';
 import { buildResultsDataFrameRows, rowsToCsv, buildPythonSnippet } from './exportData.js';
 import { ACCOUNT_TYPE_LABELS } from './accounts.js';
 import { loanDownPaymentAmount, loanMonthlyPayment } from './blocks.js';
+import { buildSummaryQuestionPrompt, buildSummaryFollowUpPrompt, validateSummaryAnswer, requestDeepSeekConversation } from './deepseek.js';
+import { serializeState } from './persistence.js';
 
 const state = { accounts: null, blocks: null, globalReturnsSchedule: null, marketEvents: [] };
 let lastChartData = null;
@@ -62,22 +64,35 @@ async function main() {
     setTimeout(resizePlots, 200);
   });
 
-  // View switching: "Plots" and "Reports" are dedicated full pages (hiding
-  // the Plan <main>); "Plan" lives inside <main> and is reached by
-  // scrolling to its anchor (the original left-column layout).
+  // View switching: "Plots", "Reports", and "Tracks" are dedicated full
+  // pages (hiding the Plan <main>); "Plan" lives inside <main> and is
+  // reached by scrolling to its anchor (the original left-column layout).
   const mainEl = document.querySelector('main');
   const plotsViewEl = document.getElementById('plotsView');
   const summaryViewEl = document.getElementById('summaryView');
   const reportsViewEl = document.getElementById('reportsView');
+  const tracksViewEl = document.getElementById('tracksView');
   const topbarTitleEl = document.querySelector('.topbar-title');
   const navLinks = [...document.querySelectorAll('#appNavigation a[data-view]')];
-  const VIEW_HASHES = { plan: '#scenarios', summary: '#summary', plots: '#plots', reports: '#reports' };
-  const VIEW_TITLES = { plan: 'Plan', summary: 'Summary', plots: 'Plots', reports: 'Reports' };
+  const VIEW_HASHES = { plan: '#scenarios', summary: '#summary', plots: '#plots', reports: '#reports', tracks: '#tracks' };
+  const VIEW_TITLES = { plan: 'Plan', summary: 'Summary', plots: 'Plots', reports: 'Reports', tracks: 'Tracks' };
+
+  // The tracks page-view fills the remaining viewport below the sticky
+  // topbar (video-editor style), so keep --topbar-h in sync with its
+  // actual rendered height.
+  const topbarEl = document.querySelector('.topbar');
+  function updateTopbarHeightVar() {
+    document.documentElement.style.setProperty('--topbar-h', `${topbarEl.offsetHeight}px`);
+  }
+  updateTopbarHeightVar();
+  if (window.ResizeObserver) new ResizeObserver(updateTopbarHeightVar).observe(topbarEl);
+  else window.addEventListener('resize', updateTopbarHeightVar);
 
   function viewForHash() {
     if (location.hash === '#plots') return 'plots';
     if (location.hash === '#summary') return 'summary';
     if (location.hash === '#reports') return 'reports';
+    if (location.hash === '#tracks') return 'tracks';
     return 'plan';
   }
 
@@ -87,6 +102,7 @@ async function main() {
     summaryViewEl.classList.toggle('view-hidden', view !== 'summary');
     plotsViewEl.classList.toggle('view-hidden', view !== 'plots');
     reportsViewEl.classList.toggle('view-hidden', view !== 'reports');
+    tracksViewEl.classList.toggle('view-hidden', view !== 'tracks');
     for (const link of navLinks) {
       const isActive = link.dataset.view === view;
       link.classList.toggle('active', isActive);
@@ -100,7 +116,8 @@ async function main() {
     if (view === 'plots') { renderPlotsEmptyState(); renderBalance(); renderAccountMix(); }
     else if (view === 'summary') { renderSummaryView(); }
     else if (view === 'reports') { renderReportsView(); }
-    else { document.getElementById('scenarios')?.scrollIntoView({ block: 'start' }); }
+    else if (view === 'tracks') { ui.activateTracksView(); }
+    else { document.getElementById('scenarios')?.scrollIntoView({ block: 'start' }); ui.refreshCashFlowList(); }
     setTimeout(resizePlots, 50);
   }
 
@@ -108,8 +125,108 @@ async function main() {
     event.preventDefault();
     setActiveView(link.dataset.view);
   }));
+  document.addEventListener('finSim:showTracksView', () => setActiveView('tracks'));
   window.addEventListener('hashchange', () => setActiveView(viewForHash(), { updateHash: false }));
   setActiveView(viewForHash(), { updateHash: false });
+
+  const summaryAskDialog = document.getElementById('summaryAskDialog');
+  const summaryAskForm = document.getElementById('summaryAskForm');
+  const summaryAskPrompt = document.getElementById('summaryAskPrompt');
+  const summaryAskStatus = document.getElementById('summaryAskStatus');
+  const summaryAskResult = document.getElementById('summaryAskResult');
+  const summaryAskConversation = document.getElementById('summaryAskConversation');
+  const summaryAskFollowups = document.getElementById('summaryAskFollowups');
+  let summaryConversationMessages = [];
+  let summaryConversationTurns = [];
+
+  function resetSummaryConversation() {
+    summaryConversationMessages = [];
+    summaryConversationTurns = [];
+    summaryAskConversation.replaceChildren();
+    summaryAskFollowups.replaceChildren();
+    summaryAskResult.classList.add('view-hidden');
+    summaryAskPrompt.value = '';
+    summaryAskStatus.textContent = '';
+    summaryAskStatus.classList.remove('error');
+  }
+
+  function renderSummaryConversation() {
+    summaryAskConversation.replaceChildren(...summaryConversationTurns.map(turn => {
+      const container = document.createElement('section');
+      container.className = 'summary-ask-turn';
+      const question = document.createElement('div');
+      question.className = 'summary-ask-question';
+      question.textContent = turn.question;
+      const answer = document.createElement('div');
+      answer.className = 'summary-ask-answer';
+      answer.textContent = turn.result.answer;
+      container.append(question, answer);
+      if (turn.result.evidence.length) {
+        const evidence = document.createElement('div');
+        evidence.className = 'summary-ask-evidence';
+        evidence.replaceChildren(...turn.result.evidence.map(item => {
+          const row = document.createElement('div');
+          const date = document.createElement('time');
+          const metric = document.createElement('b');
+          const detail = document.createElement('span');
+          date.textContent = item.date || 'Plan';
+          metric.textContent = [item.metric, item.value].filter(Boolean).join(': ');
+          detail.textContent = item.explanation;
+          row.append(date, metric, detail);
+          return row;
+        }));
+        container.append(evidence);
+      }
+      const caveatLines = turn.result.caveats.map(item => `Caveat: ${item}`);
+      if (caveatLines.length) {
+        const caveats = document.createElement('div');
+        caveats.className = 'summary-ask-caveats';
+        caveats.textContent = caveatLines.join('\n');
+        container.append(caveats);
+      }
+      return container;
+    }));
+
+    summaryAskFollowups.replaceChildren();
+    const latest = summaryConversationTurns.at(-1);
+    for (const followUp of latest?.result.followUpQuestions || []) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = followUp;
+      button.addEventListener('click', () => {
+        summaryAskPrompt.value = followUp;
+        summaryAskForm.requestSubmit();
+      });
+      summaryAskFollowups.appendChild(button);
+    }
+    summaryAskResult.classList.toggle('view-hidden', summaryConversationTurns.length === 0);
+    summaryAskConversation.lastElementChild?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+
+  function closeSummaryAsk() {
+    summaryAskDialog.close();
+  }
+
+  document.getElementById('summaryAskButton').addEventListener('click', () => {
+    if (!lastChartData) return;
+    summaryAskStatus.textContent = '';
+    summaryAskStatus.classList.remove('error');
+    renderSummaryConversation();
+    summaryAskDialog.showModal();
+    summaryAskPrompt.focus();
+  });
+  document.getElementById('closeSummaryAsk').addEventListener('click', closeSummaryAsk);
+  document.getElementById('cancelSummaryAsk').addEventListener('click', closeSummaryAsk);
+  document.getElementById('newSummaryConversation').addEventListener('click', () => {
+    resetSummaryConversation();
+    summaryAskPrompt.focus();
+  });
+  document.querySelectorAll('[data-summary-question]').forEach(button => {
+    button.addEventListener('click', () => {
+      summaryAskPrompt.value = button.dataset.summaryQuestion;
+      summaryAskPrompt.focus();
+    });
+  });
 
   document.getElementById('runSim').addEventListener('click', () => {
     const curAge = parseInt(document.getElementById('currentAge').value, 10);
@@ -145,6 +262,7 @@ async function main() {
     });
 
     const out = sim.run();
+    resetSummaryConversation();
 
     const labels = Array.from({ length: months }, (_, i) => {
       const d = new Date(startDate); d.setDate(1); d.setMonth(d.getMonth() + i);
@@ -158,6 +276,9 @@ async function main() {
 
     lastChartData = {
       labels, median, p10, p90, mean,
+      assetOnlyP10: out.assetOnlyTimeline.map(point => point.p10),
+      assetOnlyMedian: out.assetOnlyTimeline.map(point => point.p50),
+      assetOnlyP90: out.assetOnlyTimeline.map(point => point.p90),
       byAccountTimeline: out.byAccountTimeline,
       marketEventStats: out.marketEventStats,
       individualTraces: out.individualTraces,
@@ -170,8 +291,24 @@ async function main() {
       bankruptcyCount: out.bankruptcyCount,
       particleCount: out.particleCount,
       maximumDebt: out.maximumDebt,
+      maximumDebtStats: out.maximumDebtStats,
       endingBelowStartingCount: out.endingBelowStartingCount,
       retirementReadinessTimeline: out.retirementReadinessTimeline,
+      simulationInputs: {
+        run: {
+          startDate: startDate.toISOString(),
+          months,
+          currentAge: curAge,
+          retirementAge: retireAge,
+          retirementMonthIndex,
+          city,
+          numParticles,
+          useParticleFilter,
+          inflationRate,
+          capitalGains: { enabled: capGainsEnabled, rate: capGainsRate },
+        },
+        state: JSON.parse(JSON.stringify(serializeState(state))),
+      },
     };
     renderBalance();
     renderAccountFilters();
@@ -365,25 +502,171 @@ async function main() {
     return insights;
   }
 
+  function summaryRangeMarkup(range) {
+    if (!range || !document.getElementById('summaryShowRanges').checked) return '';
+    const lower = Number(range.lower);
+    const center = Number(range.center);
+    const upper = Number(range.upper);
+    if (![lower, center, upper].every(Number.isFinite)) return '';
+    const low = Math.min(lower, upper);
+    const high = Math.max(lower, upper);
+    const position = high === low ? 50 : Math.min(100, Math.max(0, (center - low) / (high - low) * 100));
+    const label = `P10 ${formatMoney(low)}; median ${formatMoney(center)}; P90 ${formatMoney(high)}`;
+    return `<div class="summary-error-range" role="img" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}">
+      <div class="summary-error-values"><span class="${low < 0 ? 'negative' : ''}">P10 ${formatMoney(low)}</span><span>P90 ${formatMoney(high)}</span></div>
+      <div class="summary-error-whisker"><i></i><b style="left:${position}%"></b></div>
+    </div>`;
+  }
+
+  function summaryQuestionContext() {
+    if (!lastChartData) return null;
+    const data = lastChartData;
+    const median = maybeDeflateSeries(data.median);
+    const assetOnlyMedian = maybeDeflateSeries(data.assetOnlyMedian);
+    const p10 = maybeDeflateSeries(data.p10);
+    const p90 = maybeDeflateSeries(data.p90);
+    const mean = maybeDeflateSeries(data.mean);
+    const accountTimeline = maybeDeflateAccountTimeline(data.byAccountTimeline);
+    const allRows = buildResultsDataFrameRows(data.labels, { p10, p50: median, p90, mean }, accountTimeline, state.accounts);
+    const maxRows = 1200;
+    let rowIndices = allRows.map((_, index) => index);
+    if (allRows.length > maxRows) {
+      const important = new Set([0, allRows.length - 1, data.retirementMonthIndex]);
+      const lowIndex = median.indexOf(Math.min(...median));
+      const highIndex = median.indexOf(Math.max(...median));
+      for (const center of [lowIndex, highIndex, data.retirementMonthIndex]) {
+        for (let offset = -6; offset <= 6; offset++) important.add(center + offset);
+      }
+      const stride = Math.ceil(allRows.length / (maxRows - important.size));
+      for (let index = 0; index < allRows.length; index += stride) important.add(index);
+      rowIndices = [...important].filter(index => index >= 0 && index < allRows.length).sort((a, b) => a - b).slice(0, maxRows);
+    }
+    const rows = rowIndices.map(index => allRows[index]);
+    const lowIndex = median.indexOf(Math.min(...median));
+    const highIndex = median.indexOf(Math.max(...median));
+    const retirementIndex = Math.min(data.months - 1, data.retirementMonthIndex);
+    const currentAge = parseInt(document.getElementById('currentAge').value, 10) || 0;
+    const targetAge = parseInt(document.getElementById('retireAge').value, 10) || currentAge;
+    const realDollars = document.getElementById('realDollars').checked;
+    const fireNumber = realDollars ? (data.fireStats?.fireNumber || 0) / inflationFactorAt(retirementIndex) : (data.fireStats?.fireNumber || 0);
+    return {
+      summary: {
+        currency_basis: realDollars ? "today's dollars" : 'nominal dollars',
+        current_age: currentAge,
+        target_retirement_age: targetAge,
+        simulation_start: data.labels[0],
+        simulation_end: data.labels.at(-1),
+        particles: data.particleCount,
+        starting_net_worth: Math.round(Object.values(state.accounts).reduce((sum, account) => sum + Number(account.balance || 0), 0)),
+        lowest_median: { date: data.labels[lowIndex], value: Math.round(median[lowIndex]) },
+        highest_median: { date: data.labels[highIndex], value: Math.round(median[highIndex]) },
+        retirement: {
+          date: data.labels[retirementIndex],
+          p10: Math.round(p10[retirementIndex]),
+          median: Math.round(median[retirementIndex]),
+          p90: Math.round(p90[retirementIndex]),
+          fire_target: Math.round(fireNumber),
+          success_rate: data.fireStats?.successRate ?? null,
+        },
+        solvency_rate: data.solvencyRate,
+        insolvent_paths: data.bankruptcyCount,
+        maximum_debt_observed: Math.round(data.maximumDebt),
+        paths_finishing_below_start: data.endingBelowStartingCount,
+        rare_market_events: (data.marketEventStats || []).map(event => ({ name: event.name, trigger_rate: event.triggerRate })),
+      },
+      simulationInputs: {
+        ...data.simulationInputs,
+        display: {
+          realDollars: document.getElementById('realDollars').checked,
+          dollarBasis: document.getElementById('realDollars').checked ? "today's dollars" : 'nominal dollars',
+        },
+      },
+      planEvents: summaryPlanEvents().slice(0, 100),
+      monthlyTableCsv: rowsToCsv(rows),
+      tableMetadata: {
+        row_count: rows.length,
+        complete_monthly_history: rows.length === allRows.length,
+        total_months: allRows.length,
+        values_rounded_to_cents: true,
+        account_columns_are_mean_balances: true,
+        omitted_rows_policy: rows.length === allRows.length ? 'none' : 'annual sampling plus six-month windows around median extrema and retirement',
+      },
+    };
+  }
+
+  summaryAskForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    const question = summaryAskPrompt.value.trim();
+    const submitButton = document.getElementById('submitSummaryAsk');
+    if (!question) {
+      summaryAskStatus.classList.add('error');
+      summaryAskStatus.textContent = 'Enter a question about the simulation.';
+      return;
+    }
+    const apiKey = document.getElementById('deepseekApiKey').value.trim();
+    if (summaryConversationTurns.length >= 12) {
+      summaryAskStatus.classList.add('error');
+      summaryAskStatus.textContent = 'This conversation has reached 12 questions. Start a new conversation to continue.';
+      return;
+    }
+    submitButton.disabled = true;
+    summaryAskStatus.classList.remove('error');
+    summaryAskStatus.textContent = 'Sending the simulation table to DeepSeek…';
+    try {
+      let userContent;
+      if (summaryConversationMessages.length === 0) {
+        const context = summaryQuestionContext();
+        if (!context) throw new Error('Run the simulation before asking a question.');
+        userContent = JSON.stringify(buildSummaryQuestionPrompt({ question, ...context }));
+      } else {
+        userContent = JSON.stringify(buildSummaryFollowUpPrompt(question));
+      }
+      const pendingMessages = [...summaryConversationMessages, { role: 'user', content: userContent }];
+      const response = await requestDeepSeekConversation(apiKey, pendingMessages);
+      const result = validateSummaryAnswer(response.value);
+      summaryConversationMessages = [...pendingMessages, { role: 'assistant', content: response.assistantContent }];
+      summaryConversationTurns.push({ question, result });
+      summaryAskPrompt.value = '';
+      summaryAskStatus.textContent = '';
+      renderSummaryConversation();
+    } catch (error) {
+      summaryAskStatus.classList.add('error');
+      summaryAskStatus.textContent = error.message || 'Unable to analyze the simulation.';
+    } finally {
+      submitButton.disabled = false;
+    }
+  });
+
   function renderSummaryView() {
     const empty = document.getElementById('summaryEmptyState');
     const content = document.getElementById('summaryContent');
     if (!lastChartData) {
+      const askButton = document.getElementById('summaryAskButton');
+      askButton.disabled = true;
+      askButton.title = 'Run the simulation before asking a question';
       empty.classList.remove('view-hidden');
       content.classList.add('view-hidden');
       return;
     }
     empty.classList.add('view-hidden');
     content.classList.remove('view-hidden');
+    const askButton = document.getElementById('summaryAskButton');
+    askButton.disabled = false;
+    askButton.title = 'Ask DeepSeek about this simulation';
 
     const data = lastChartData;
     const median = maybeDeflateSeries(data.median);
     const p10 = maybeDeflateSeries(data.p10);
     const p90 = maybeDeflateSeries(data.p90);
+    const assetOnlyP10 = maybeDeflateSeries(data.assetOnlyP10);
+    const assetOnlyMedian = maybeDeflateSeries(data.assetOnlyMedian);
+    const assetOnlyP90 = maybeDeflateSeries(data.assetOnlyP90);
     const startBalance = Object.values(state.accounts).reduce((sum, account) => sum + Number(account.balance || 0), 0);
     const minValue = Math.min(...median);
+    const minAssetValue = Math.min(...assetOnlyMedian);
     const maxValue = Math.max(...median);
     const minIndex = median.indexOf(minValue);
+    const minAssetIndex = assetOnlyMedian.indexOf(minAssetValue);
     const maxIndex = median.indexOf(maxValue);
     const retirementIndex = Math.min(data.months - 1, data.retirementMonthIndex);
     const retirementMedian = median[retirementIndex];
@@ -396,17 +679,18 @@ async function main() {
     const first90Age = first90Index >= 0 ? currentAge + first90Index / 12 : null;
     const cards = [
       { label: 'Starting net worth', value: formatMoney(startBalance), sub: `${Object.keys(state.accounts).length} accounts` },
-      { label: 'Lowest median balance', value: formatMoney(minValue), sub: data.labels[minIndex] },
-      { label: 'Highest median balance', value: formatMoney(maxValue), sub: data.labels[maxIndex] },
-      { label: 'Maximum debt observed', value: formatMoney(data.maximumDebt), sub: 'Across all simulated paths' },
+      { label: 'Lowest median assets', value: formatMoney(minAssetValue), sub: `${data.labels[minAssetIndex]} · debt excluded`, range: { lower: assetOnlyP10[minAssetIndex], center: minAssetValue, upper: assetOnlyP90[minAssetIndex] } },
+      { label: 'Lowest median assets less debt', value: formatMoney(minValue), sub: `${data.labels[minIndex]} · home asset excluded`, tone: minValue < 0 ? 'watch' : '', range: { lower: p10[minIndex], center: minValue, upper: p90[minIndex] } },
+      { label: 'Highest median balance', value: formatMoney(maxValue), sub: data.labels[maxIndex], range: { lower: p10[maxIndex], center: maxValue, upper: p90[maxIndex] } },
+      { label: 'Peak debt (median path)', value: formatMoney(data.maximumDebtStats?.p50 || 0), sub: `Nominal across paths · worst ${formatMoney(data.maximumDebt)}`, range: { lower: data.maximumDebtStats?.p10, center: data.maximumDebtStats?.p50, upper: data.maximumDebtStats?.p90 } },
       { label: 'Insolvent simulations', value: `${data.bankruptcyCount} / ${data.particleCount}`, sub: `${formatPercent(bankruptcyRate)} ever had a shortfall or ended negative`, tone: bankruptcyRate > .1 ? 'danger' : bankruptcyRate > 0 ? 'watch' : 'good' },
-      { label: 'At target retirement', value: formatMoney(retirementMedian), sub: `Median · ${data.labels[retirementIndex]}` },
+      { label: 'At target retirement', value: formatMoney(retirementMedian), sub: `Median · ${data.labels[retirementIndex]}`, range: { lower: p10[retirementIndex], center: retirementMedian, upper: p90[retirementIndex] } },
       { label: 'Worst median drawdown', value: drawdown.rate <= -1 ? '>100%' : formatPercent(Math.abs(drawdown.rate)), sub: `${drawdown.peakDate} → ${drawdown.troughDate}`, tone: drawdown.rate < -.2 ? 'watch' : 'good' },
       { label: '90% confidence age', value: first90Age == null ? 'Not reached' : String(Math.ceil(first90Age)), sub: first90Age == null ? 'Within modeled horizon' : `${Math.ceil(first90Age - currentAge)} years from now`, tone: first90Age == null ? 'danger' : first90Age > targetAge ? 'watch' : 'good' },
       { label: 'Finish below start', value: `${data.endingBelowStartingCount} / ${data.particleCount}`, sub: formatPercent(belowStartRate), tone: belowStartRate > .1 ? 'watch' : 'good' },
     ];
     document.getElementById('summaryHeroCards').innerHTML = cards.map(card => `
-      <div class="summary-hero-card ${card.tone || ''}"><span>${escapeHtml(card.label)}</span><strong>${escapeHtml(card.value)}</strong><small>${escapeHtml(card.sub)}</small></div>`).join('');
+      <div class="summary-hero-card ${card.tone || ''} ${Number(card.range?.lower) < 0 ? 'range-negative' : ''}"><span>${escapeHtml(card.label)}</span><strong>${escapeHtml(card.value)}</strong><small>${escapeHtml(card.sub)}</small>${summaryRangeMarkup(card.range)}</div>`).join('');
 
     const recommendation = retirementRecommendation(data, currentAge, targetAge);
     document.getElementById('retirementRecommendation').className = `summary-recommendation ${recommendation.tone}`;
@@ -593,7 +877,8 @@ async function main() {
 
   document.getElementById('balanceScale').addEventListener('change', renderBalance);
   document.getElementById('compositionScale').addEventListener('change', renderAccountMix);
-  document.getElementById('realDollars').addEventListener('change', () => { renderBalance(); renderAccountMix(); renderSummaryView(); renderReportsView(); });
+  document.getElementById('realDollars').addEventListener('change', () => { resetSummaryConversation(); renderBalance(); renderAccountMix(); renderSummaryView(); renderReportsView(); });
+  document.getElementById('summaryShowRanges').addEventListener('change', renderSummaryView);
   document.getElementById('showIndividualTraces').addEventListener('change', event => {
     document.getElementById('individualTraceCount').disabled = !event.target.checked;
     renderBalance();

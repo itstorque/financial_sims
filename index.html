@@ -46,14 +46,13 @@
       </div>
     </dialog>
 
-    <dialog id="trackEditor" class="track-editor-dialog" aria-labelledby="trackEditorTitle">
+    <section id="tracksView" class="tracks-page-view view-hidden" aria-label="Cash-flow tracks">
       <div class="track-editor-shell">
         <header class="editor-header">
           <div>
             <span class="experimental-badge">Experimental</span>
-            <h2 id="trackEditorTitle">Cash-flow tracks</h2>
+            <h2>Cash-flow tracks</h2>
           </div>
-          <button id="closeTrackEditor" class="icon-button secondary" type="button" aria-label="Close track view">×</button>
         </header>
         <div class="track-editor-toolbar">
           <p>Each recurring cash flow has its own track. Select a clip to edit or splice it into a new condition.</p>
@@ -69,10 +68,30 @@
             </div>
           </div>
         </div>
+        <div class="track-tabs">
+          <div class="track-tabs-group" role="tablist" aria-label="Track editor view">
+            <button id="trackTabTracks" class="track-tab active" type="button" role="tab" aria-selected="true">Tracks</button>
+            <button id="trackTabCashflow" class="track-tab" type="button" role="tab" aria-selected="false">Cash flow</button>
+          </div>
+          <button id="trackChartFullscreen" class="secondary track-chart-toggle view-hidden" type="button" aria-pressed="false" title="Maximize tracks view"><span aria-hidden="true">⤢</span> Maximize tracks</button>
+        </div>
+        <div id="trackCashflowChart" class="track-cashflow-chart view-hidden">
+          <div class="track-cashflow-chart-header">
+            <strong>Projected income vs. spend</strong>
+            <span class="track-cashflow-chart-hint">Excludes transfers to taxable brokerage, retirement, and Roth accounts</span>
+            <div class="track-cashflow-legend">
+              <span class="income"><i></i>Income</span>
+              <span class="expense"><i></i>Spend</span>
+            </div>
+          </div>
+          <div id="trackCashflowScroll" class="track-cashflow-scroll">
+            <svg id="trackCashflowSvg" class="track-cashflow-svg" preserveAspectRatio="none"></svg>
+          </div>
+        </div>
         <div id="trackEditorBody" class="track-editor-body"></div>
         <section id="trackInspector" class="track-inspector" aria-live="polite"></section>
       </div>
-    </dialog>
+    </section>
 
     <dialog id="smartTrackDialog" class="smart-track-dialog" aria-labelledby="smartTrackTitle">
       <form id="smartTrackForm" method="dialog">
@@ -94,6 +113,38 @@
       </form>
     </dialog>
 
+    <dialog id="summaryAskDialog" class="summary-ask-dialog" aria-labelledby="summaryAskTitle">
+      <form id="summaryAskForm">
+        <header class="smart-track-header">
+          <div><span class="smart-badge">AI</span><h2 id="summaryAskTitle">Ask about this simulation</h2></div>
+          <div class="summary-ask-header-actions">
+            <button id="newSummaryConversation" class="secondary" type="button">New conversation</button>
+            <button id="closeSummaryAsk" class="icon-button secondary" type="button" aria-label="Close simulation assistant">×</button>
+          </div>
+        </header>
+        <div class="summary-ask-content">
+          <p>DeepSeek receives the complete simulation input snapshot, monthly results table, plan events, and summary metrics. Your API key and scenario notes are never included.</p>
+          <div class="summary-ask-suggestions" aria-label="Suggested questions">
+            <button class="secondary" type="button" data-summary-question="Summarize my overall financial outlook, the strongest parts of the plan, and the three most important risks or actions.">Summarize my status</button>
+            <button class="secondary" type="button" data-summary-question="What causes the lowest median balance, and which cash flows or accounts contribute most to it?">Explain the low point</button>
+            <button class="secondary" type="button" data-summary-question="How resilient is my retirement plan, and what changes would most improve the downside case?">Review retirement</button>
+          </div>
+          <label>Your question
+            <textarea id="summaryAskPrompt" rows="4" placeholder="Why is my lowest median balance $2,442 in 2028-01?"></textarea>
+          </label>
+          <div id="summaryAskStatus" class="smart-track-status" aria-live="polite"></div>
+          <article id="summaryAskResult" class="summary-ask-result view-hidden" aria-live="polite">
+            <div id="summaryAskConversation" class="summary-ask-conversation"></div>
+            <div id="summaryAskFollowups" class="summary-ask-followups"></div>
+          </article>
+        </div>
+        <footer class="smart-track-actions">
+          <button id="cancelSummaryAsk" class="secondary" type="button">Close</button>
+          <button id="submitSummaryAsk" type="submit"><span aria-hidden="true">✦</span> Ask DeepSeek</button>
+        </footer>
+      </form>
+    </dialog>
+
     <div class="app-shell">
       <aside class="app-nav">
         <div class="brand">
@@ -106,6 +157,7 @@
           <a href="#summary" data-view="summary" aria-label="Summary" title="Summary"><span class="nav-icon" aria-hidden="true">S</span><span class="nav-label">Summary</span></a>
           <a href="#plots" data-view="plots" aria-label="Plots" title="Plots"><span class="nav-icon" aria-hidden="true">▤</span><span class="nav-label">Plots</span></a>
           <a href="#reports" data-view="reports" aria-label="Reports" title="Reports"><span class="nav-icon" aria-hidden="true">R</span><span class="nav-label">Reports</span></a>
+          <a href="#tracks" data-view="tracks" aria-label="Tracks" title="Tracks"><span class="nav-icon" aria-hidden="true">T</span><span class="nav-label">Tracks</span></a>
         </nav>
         <div class="nav-section-title"><span>Accounts</span></div>
         <div id="navAccounts" class="nav-accounts"></div>
@@ -155,13 +207,21 @@
           <div class="row">
             <label>Scenario name <input id="scenarioName" type="text" placeholder="Base case"/></label>
           </div>
-          <div class="row">
-            <label>Notes <textarea id="scenarioNotes" rows="3"></textarea></label>
+          <div class="scenario-notes">
+            <div class="scenario-notes-header">
+              <span>Notes</span>
+              <button id="editScenarioNotes" class="secondary" type="button" aria-expanded="false">Edit</button>
+            </div>
+            <div id="scenarioNotesPreview" class="markdown-body" aria-live="polite"></div>
+            <label id="scenarioNotesEditor" class="scenario-notes-editor" hidden>
+              <span class="sr-only">Edit scenario notes as Markdown</span>
+              <textarea id="scenarioNotes" rows="8" placeholder="Write notes using Markdown…"></textarea>
+              <small>Write plain Markdown here. Select Done to see it formatted.</small>
+            </label>
           </div>
           <div class="row">
             <button id="exportScenario" class="secondary" type="button">Export JSON</button>
             <button id="loadScenario" type="button">Load JSON</button>
-            <button id="loadExampleScenario" class="secondary" type="button">Test load example</button>
             <input id="scenarioFile" type="file" accept="application/json,.json" hidden/>
           </div>
           <div class="row">
@@ -314,6 +374,8 @@
               <h2>Summary</h2>
               <p class="small">A decision-focused overview of this plan and its simulated outcomes.</p>
             </div>
+              <label class="summary-range-toggle" title="Outcome range across simulated paths, not a statistical confidence interval"><input id="summaryShowRanges" type="checkbox" checked/> Show P10–P90 ranges</label>
+            <button id="summaryAskButton" class="secondary summary-ask-button" type="button" disabled title="Run the simulation before asking a question"><span aria-hidden="true">✦</span> Ask</button>
           </div>
           <div id="summaryEmptyState" class="summary-empty">
             <strong>No simulation results yet</strong>
@@ -321,6 +383,10 @@
           </div>
           <div id="summaryContent" class="view-hidden">
             <div id="summaryHeroCards" class="summary-hero-grid"></div>
+            <aside class="summary-accounting-note">
+              <strong>How to read housing debt</strong>
+              <p><b>Financial assets</b> excludes loans and is useful for judging liquidity. <b>Financial assets less debt</b> subtracts the mortgage, but this simulator does not currently add the home’s market value as an asset—so it is not complete household net worth after a purchase. A true household-net-worth figure would add home value and subtract the remaining mortgage.</p>
+            </aside>
             <article id="retirementRecommendation" class="summary-recommendation"></article>
             <article class="summary-panel summary-insights-panel">
               <div class="chart-heading"><h3>Key risks &amp; actions</h3></div>

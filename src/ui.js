@@ -14,6 +14,7 @@ import { buildBaseScenario } from './baseScenario.js';
 import { loadMeScenario } from './meScenario.js';
 import { createMarketEvent } from './marketEvents.js';
 import { buildTrackPrompt, buildTrackEditPrompt, validateTrackCreation, validateTrackEdit, requestDeepSeek } from './deepseek.js';
+import { renderMarkdown } from './markdown.js';
 
 function todayMonth() {
   const d = new Date();
@@ -100,6 +101,9 @@ export async function initUI(state) {
   const defaultSigmaInput = document.getElementById('defaultSigma');
   const scenarioNameInput = document.getElementById('scenarioName');
   const scenarioNotesInput = document.getElementById('scenarioNotes');
+  const scenarioNotesPreview = document.getElementById('scenarioNotesPreview');
+  const scenarioNotesEditor = document.getElementById('scenarioNotesEditor');
+  const editScenarioNotesButton = document.getElementById('editScenarioNotes');
   const scenarioFileInput = document.getElementById('scenarioFile');
   const scenarioStatus = document.getElementById('scenarioStatus');
   const blockEditor = document.getElementById('blockEditor');
@@ -107,16 +111,39 @@ export async function initUI(state) {
   const editorDetail = document.getElementById('editorDetail');
   const editorBlockCount = document.getElementById('editorBlockCount');
   const editorState = { blockId: null, clipIndex: 0, timelineScrollLeft: 0 };
-  const trackEditor = document.getElementById('trackEditor');
   const trackEditorBody = document.getElementById('trackEditorBody');
   const trackInspector = document.getElementById('trackInspector');
-  const trackState = { blockId: null, clipIndex: null, scrollLeft: 0, pixelsPerMonth: 5, pendingCenterRatio: null, scissorsMode: false, smartEditMode: false };
+  const trackState = { blockId: null, clipIndex: null, scrollLeft: 0, pixelsPerMonth: 5, pendingCenterRatio: null, scissorsMode: false, smartEditMode: false, activeTab: 'tracks', chartCollapsed: false };
   const smartTrackDialog = document.getElementById('smartTrackDialog');
   const smartTrackForm = document.getElementById('smartTrackForm');
   const smartTrackPrompt = document.getElementById('smartTrackPrompt');
   const smartTrackStatus = document.getElementById('smartTrackStatus');
   const deepseekApiKey = document.getElementById('deepseekApiKey');
   let smartTrackMode = 'create';
+
+  function updateScenarioNotesPreview() {
+    const notes = scenarioNotesInput.value.trim();
+    scenarioNotesPreview.innerHTML = notes
+      ? renderMarkdown(notes)
+      : '<p class="scenario-notes-empty">No notes yet.</p>';
+  }
+
+  function setScenarioNotesEditing(editing) {
+    scenarioNotesPreview.hidden = editing;
+    scenarioNotesEditor.hidden = !editing;
+    editScenarioNotesButton.textContent = editing ? 'Done' : 'Edit';
+    editScenarioNotesButton.setAttribute('aria-expanded', String(editing));
+    if (editing) {
+      scenarioNotesInput.focus();
+    } else {
+      updateScenarioNotesPreview();
+    }
+  }
+
+  editScenarioNotesButton.addEventListener('click', () => {
+    setScenarioNotesEditing(scenarioNotesEditor.hidden);
+  });
+  scenarioNotesInput.addEventListener('input', updateScenarioNotesPreview);
 
   try { deepseekApiKey.value = sessionStorage.getItem('finSim.deepseekApiKey.v1') || ''; } catch {}
   deepseekApiKey.addEventListener('input', () => {
@@ -155,6 +182,7 @@ export async function initUI(state) {
     scenarioNotesInput.value = base.notes;
     scenarioNameInput.value = base.name;
   }
+  updateScenarioNotesPreview();
   seedDefaultBlocksIfEmpty(state);
 
   defaultAnnualInput.value = pct(state.globalReturnsSchedule.defaultAnnual);
@@ -462,6 +490,71 @@ export async function initUI(state) {
     return buildScheduleClips(source, window.from, window.to);
   }
 
+  // Cash flows into taxable/retirement/roth accounts are transfers into investments,
+  // not real spending or take-home income, so the cash-flow chart excludes them.
+  const INVESTMENT_ACCOUNT_TYPES = new Set(['taxable', 'retirement', 'roth']);
+
+  function cashFlowSeries(window, totalMonths) {
+    const income = new Array(totalMonths).fill(0);
+    const expense = new Array(totalMonths).fill(0);
+    const windowStartIdx = keyToIdx(window.from);
+    for (const block of trackBlocks()) {
+      const isIncome = block.kind !== 'loan' && block.category === 'income';
+      const accountId = block.kind === 'loan' ? block.sourceAccountId : (isIncome ? block.targetAccountId : block.sourceAccountId);
+      const account = state.accounts[accountId];
+      if (account && INVESTMENT_ACCOUNT_TYPES.has(account.type)) continue;
+      const series = isIncome ? income : expense;
+      if (block.kind === 'loan') {
+        // Show a steady "house payment" (down payment amortized across the
+        // loan term + the ongoing mortgage payment) for every month of the
+        // loan, instead of a one-month spike for the down payment.
+        const [paymentFrom, paymentTo] = loanPaymentWindow(block);
+        const termMonths = Math.max(1, keyToIdx(paymentTo) - keyToIdx(paymentFrom) + 1);
+        const housePayment = loanMonthlyPayment(block) + loanDownPaymentAmount(block) / termMonths;
+        const startIdx = Math.max(0, keyToIdx(paymentFrom) - windowStartIdx);
+        const endIdx = Math.min(totalMonths - 1, keyToIdx(paymentTo) - windowStartIdx);
+        for (let i = startIdx; i <= endIdx; i++) series[i] += housePayment;
+        continue;
+      }
+      for (const clip of clipsForTrack(block, window)) {
+        const startIdx = Math.max(0, keyToIdx(clip.from) - windowStartIdx);
+        const endIdx = Math.min(totalMonths - 1, keyToIdx(clip.to) - windowStartIdx);
+        const perMonth = Math.abs((Number(clip.annualAmount) || 0) / 12);
+        for (let i = startIdx; i <= endIdx; i++) series[i] += perMonth;
+      }
+    }
+    return { income, expense };
+  }
+
+  function renderCashflowChart(window, totalMonths, timelineWidth) {
+    const svg = document.getElementById('trackCashflowSvg');
+    if (!svg) return;
+    const height = 140;
+    const padding = 10;
+    const { income, expense } = cashFlowSeries(window, totalMonths);
+    const maxValue = Math.max(1, ...income, ...expense);
+    const toLine = series => {
+      let d = '';
+      for (let i = 0; i < series.length; i++) {
+        const x1 = (i / totalMonths) * timelineWidth;
+        const x2 = ((i + 1) / totalMonths) * timelineWidth;
+        const y = height - padding - (series[i] / maxValue) * (height - padding * 2);
+        d += (i === 0 ? `M${x1},${y}` : ` L${x1},${y}`) + ` L${x2},${y}`;
+      }
+      return d || `M0,${height - padding} L${timelineWidth},${height - padding}`;
+    };
+    const incomeLine = toLine(income);
+    const expenseLine = toLine(expense);
+    svg.setAttribute('viewBox', `0 0 ${Math.max(1, timelineWidth)} ${height}`);
+    svg.setAttribute('width', Math.max(1, timelineWidth));
+    svg.setAttribute('height', height);
+    svg.innerHTML = `
+      <path class="cashflow-fill income" d="${incomeLine} L${timelineWidth},${height} L0,${height} Z"></path>
+      <path class="cashflow-fill expense" d="${expenseLine} L${timelineWidth},${height} L0,${height} Z"></path>
+      <path class="cashflow-line income" d="${incomeLine}"></path>
+      <path class="cashflow-line expense" d="${expenseLine}"></path>`;
+  }
+
   function selectedTrack() {
     const block = state.blocks.find(item => item.id === trackState.blockId);
     if (!block || trackState.clipIndex == null) return null;
@@ -636,7 +729,6 @@ export async function initUI(state) {
           <button id="trackOpenDetail" class="secondary" type="button">Open loan editor</button>
         </div>`;
       document.getElementById('trackOpenDetail').addEventListener('click', () => {
-        trackEditor.close();
         openBlockEditor(block.id);
       });
       return;
@@ -683,7 +775,6 @@ export async function initUI(state) {
       commitClips();
     });
     document.getElementById('trackOpenDetail').addEventListener('click', () => {
-      trackEditor.close();
       openBlockEditor(block.id);
     });
   }
@@ -694,6 +785,7 @@ export async function initUI(state) {
     const totalMonths = keyToIdx(window.to) - keyToIdx(window.from) + 1;
     const pixelsPerMonth = trackState.pixelsPerMonth;
     const timelineWidth = Math.max(1, totalMonths * pixelsPerMonth);
+    renderCashflowChart(window, totalMonths, timelineWidth);
     document.getElementById('trackWindowLabel').textContent = `${window.from} → ${window.to}`;
     document.getElementById('trackZoomLevel').textContent = `${Math.round(pixelsPerMonth / 5 * 100)}%`;
     document.getElementById('trackZoomOut').disabled = pixelsPerMonth <= 0.25;
@@ -719,7 +811,7 @@ export async function initUI(state) {
         <div class="track-corner">Cash flow</div>
         ${blocks.map(block => `<div class="track-label-row">
           <button class="track-label" data-track-detail="${escapeHtml(block.id)}" type="button"><span class="track-kind ${block.kind === 'loan' ? 'loan' : block.category}">${block.kind === 'loan' ? 'purchase' : block.category}</span><strong>${escapeHtml(block.description)}</strong><small>${block.kind === 'loan' ? `${formatCompactMoney(loanDownPaymentAmount(block))} down · ${formatCompactMoney(loanMonthlyPayment(block))}/mo` : block.useCustomSchedule ? 'clip schedule' : 'simple recurring'}</small></button>
-          <button class="track-label-remove" data-track-remove="${escapeHtml(block.id)}" type="button" title="Delete this track" aria-label="Delete ${escapeHtml(block.description)} track">×</button>
+          <button class="track-label-remove" data-track-remove="${escapeHtml(block.id)}" type="button" title="Delete this track" aria-label="Delete ${escapeHtml(block.description)} track"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6 1.5h4a.5.5 0 0 1 .5.5v1h3a.5.5 0 0 1 0 1h-.55l-.7 9.11a1.5 1.5 0 0 1-1.5 1.39H5.25a1.5 1.5 0 0 1-1.5-1.39L3.05 4H2.5a.5.5 0 0 1 0-1h3V2a.5.5 0 0 1 .5-.5Zm-.5 2h5V2.5h-5V3.5Zm-1.44 1 .69 8.96a.5.5 0 0 0 .5.46h5.5a.5.5 0 0 0 .5-.46L11.94 4.5H4.06ZM6.5 6a.5.5 0 0 1 .5.5v5a.5.5 0 0 1-1 0v-5a.5.5 0 0 1 .5-.5Zm3 0a.5.5 0 0 1 .5.5v5a.5.5 0 0 1-1 0v-5a.5.5 0 0 1 .5-.5Z" fill="currentColor"/></svg></button>
         </div>`).join('')}
       </div>
       <div class="track-scroll">
@@ -753,7 +845,15 @@ export async function initUI(state) {
     } else {
       scroll.scrollLeft = trackState.scrollLeft;
     }
-    scroll.addEventListener('scroll', () => { trackState.scrollLeft = scroll.scrollLeft; }, { passive: true });
+    const chartScroll = document.getElementById('trackCashflowScroll');
+    if (chartScroll) {
+      chartScroll.scrollLeft = scroll.scrollLeft;
+      chartScroll.onscroll = () => { scroll.scrollLeft = chartScroll.scrollLeft; };
+    }
+    scroll.addEventListener('scroll', () => {
+      trackState.scrollLeft = scroll.scrollLeft;
+      if (chartScroll) chartScroll.scrollLeft = scroll.scrollLeft;
+    }, { passive: true });
     trackEditorBody.querySelectorAll('[data-track-block]').forEach(button => {
       button.addEventListener('click', () => {
         if (trackState.scissorsMode) return;
@@ -823,7 +923,6 @@ export async function initUI(state) {
     }, true);
     trackEditorBody.querySelectorAll('[data-track-detail]').forEach(button => {
       button.addEventListener('click', () => {
-        trackEditor.close();
         openBlockEditor(button.dataset.trackDetail);
       });
     });
@@ -836,7 +935,7 @@ export async function initUI(state) {
     renderTrackInspector();
   }
 
-  document.getElementById('openTrackEditor').addEventListener('click', () => {
+  function activateTracksView() {
     trackState.blockId = null;
     trackState.clipIndex = null;
     trackState.scrollLeft = 0;
@@ -844,8 +943,35 @@ export async function initUI(state) {
     trackState.pendingCenterRatio = null;
     trackState.scissorsMode = false;
     trackState.smartEditMode = false;
+    trackState.chartCollapsed = false;
+    setTrackTab('tracks');
     renderTrackEditor();
-    trackEditor.showModal();
+  }
+  document.getElementById('openTrackEditor').addEventListener('click', () => {
+    activateTracksView();
+    document.dispatchEvent(new CustomEvent('finSim:showTracksView'));
+  });
+  function setTrackTab(tab) {
+    trackState.activeTab = tab;
+    const isCashflow = tab === 'cashflow';
+    const tracksTabButton = document.getElementById('trackTabTracks');
+    const cashflowTabButton = document.getElementById('trackTabCashflow');
+    tracksTabButton.classList.toggle('active', !isCashflow);
+    tracksTabButton.setAttribute('aria-selected', String(!isCashflow));
+    cashflowTabButton.classList.toggle('active', isCashflow);
+    cashflowTabButton.setAttribute('aria-selected', String(isCashflow));
+    document.getElementById('trackChartFullscreen').classList.toggle('view-hidden', !isCashflow);
+    document.getElementById('trackCashflowChart').classList.toggle('view-hidden', !isCashflow || trackState.chartCollapsed);
+  }
+  document.getElementById('trackTabTracks').addEventListener('click', () => setTrackTab('tracks'));
+  document.getElementById('trackTabCashflow').addEventListener('click', () => setTrackTab('cashflow'));
+  document.getElementById('trackChartFullscreen').addEventListener('click', () => {
+    trackState.chartCollapsed = !trackState.chartCollapsed;
+    const button = document.getElementById('trackChartFullscreen');
+    button.setAttribute('aria-pressed', String(trackState.chartCollapsed));
+    button.title = trackState.chartCollapsed ? 'Show cash-flow chart' : 'Maximize tracks view';
+    button.innerHTML = trackState.chartCollapsed ? '<span aria-hidden="true">⤡</span> Show chart' : '<span aria-hidden="true">⤡</span> Maximize tracks';
+    document.getElementById('trackCashflowChart').classList.toggle('view-hidden', trackState.activeTab !== 'cashflow' || trackState.chartCollapsed);
   });
   function changeTrackZoom(nextPixelsPerMonth) {
     const scroll = trackEditorBody.querySelector('.track-scroll');
@@ -893,9 +1019,6 @@ export async function initUI(state) {
   const closeSmartTrack = () => smartTrackDialog.close();
   document.getElementById('closeSmartTrack').addEventListener('click', closeSmartTrack);
   document.getElementById('cancelSmartTrack').addEventListener('click', closeSmartTrack);
-  document.getElementById('closeTrackEditor').addEventListener('click', () => trackEditor.close());
-  trackEditor.addEventListener('click', event => { if (event.target === trackEditor) trackEditor.close(); });
-  trackEditor.addEventListener('close', () => renderBlocks());
 
   function renderSegmentRows(entries, container, onChange) {
     container.innerHTML = '';
@@ -1409,6 +1532,8 @@ export async function initUI(state) {
     state.withdrawalOrder = data.state.withdrawalOrder || [];
     applySettings(data.settings);
     scenarioNotesInput.value = data.notes || '';
+    updateScenarioNotesPreview();
+    setScenarioNotesEditing(false);
     defaultAnnualInput.value = pct(state.globalReturnsSchedule.defaultAnnual);
     defaultSigmaInput.value = pct(state.globalReturnsSchedule.defaultSigma);
     renderAccounts();
@@ -1456,17 +1581,6 @@ export async function initUI(state) {
     }
   });
 
-  document.getElementById('loadExampleScenario').addEventListener('click', async () => {
-    scenarioStatus.textContent = 'Loading me.example.json…';
-    try {
-      const response = await fetch('./me.example.json', { cache: 'no-store' });
-      if (!response.ok) throw new Error(`Could not load me.example.json (${response.status}).`);
-      applyImportedScenario(reviveScenarioExport(await response.json()), 'me.example.json');
-    } catch (error) {
-      scenarioStatus.textContent = error instanceof SyntaxError ? 'me.example.json is not valid JSON.' : error.message;
-    }
-  });
-
   document.getElementById('resetToBase').addEventListener('click', () => {
     // Clears the autosaved working session so the next load falls back to
     // `me.json` (if present) or the generic base scenario. This is the fix
@@ -1494,6 +1608,6 @@ export async function initUI(state) {
   document.addEventListener('change', scheduleAutosave);
   document.addEventListener('click', scheduleAutosave); // covers add/remove buttons (no input/change event)
 
-  return { getCity: () => citySelect.value };
+  return { getCity: () => citySelect.value, activateTracksView, refreshCashFlowList: renderBlocks };
 }
 

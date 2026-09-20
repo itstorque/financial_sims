@@ -11,13 +11,19 @@ import { childCostAmountSchedule, SF_CHILD_COST_BRACKETS } from '../src/childCos
 import { buildBaseScenario, BASE_SCENARIO_NAME } from '../src/baseScenario.js';
 import { createMarketEvent, sampleMarketEvents, eventAppliesToAccount } from '../src/marketEvents.js';
 import { accountColumnKey, buildResultsDataFrameRows, rowsToCsv, buildPythonSnippet } from '../src/exportData.js';
-import { buildTrackPrompt, buildTrackEditPrompt, validateTrackCreation, validateTrackEdit } from '../src/deepseek.js';
+import { buildTrackPrompt, buildTrackEditPrompt, validateTrackCreation, validateTrackEdit, buildSummaryQuestionPrompt, buildSummaryFollowUpPrompt, validateSummaryAnswer } from '../src/deepseek.js';
+import { renderMarkdown } from '../src/markdown.js';
 
 let failures = 0;
 function assert(cond, msg) {
   if (!cond) { console.error('FAIL:', msg); failures++; }
   else console.log('ok  :', msg);
 }
+
+// --- Scenario-note Markdown ---
+const renderedNotes = renderMarkdown('# Assumptions\n\n- **Salary:** $100k\n- [Plan](https://example.com)');
+assert(renderedNotes.includes('<h1>Assumptions</h1>') && renderedNotes.includes('<strong>Salary:</strong>'), 'scenario notes render headings, lists, and emphasis as Markdown');
+assert(!renderMarkdown('<script>alert(1)</script> [bad](javascript:alert(1))').includes('<script>'), 'scenario-note Markdown escapes HTML and rejects unsafe links');
 
 // --- Structured AI cash-flow edits ---
 const aiWindow = { from: '2026-01', to: '2040-12' };
@@ -42,6 +48,25 @@ const aiEdit = validateTrackEdit({
   clips: [{ from: '2026-01', to: '2040-12', name: 'Paused', annualAmount: 0 }],
 }, { window: aiWindow, trackId: 'track-1' });
 assert(aiEdit.clips[0].annualAmount === 0, 'Smart Edit accepts a valid replacement schedule');
+const summaryPrompt = buildSummaryQuestionPrompt({
+  question: 'Why is the median lowest in 2028-01?',
+  summary: { lowest_median: { date: '2028-01', value: 2442 } },
+  simulationInputs: { run: { city: 'Default', numParticles: 300 }, state: { accounts: [], blocks: [], withdrawalOrder: [] } },
+  planEvents: [{ month: '2028-01', title: 'Home purchase' }],
+  monthlyTableCsv: 'month,p10,p50,p90\n2028-01,-10000,2442,30000',
+  tableMetadata: { row_count: 1, complete_monthly_history: true },
+});
+assert(summaryPrompt.task === 'analyze_financial_simulation' && summaryPrompt.monthly_simulation_table.format === 'CSV', 'Summary Ask sends the simulation table in a structured JSON prompt');
+assert(summaryPrompt.simulation_inputs.run.numParticles === 300 && Array.isArray(summaryPrompt.simulation_inputs.state.blocks), 'Summary Ask includes the complete simulation input snapshot');
+const summaryAnswer = validateSummaryAnswer({
+  answer: 'The low point coincides with the home purchase.',
+  evidence: [{ date: '2028-01', metric: 'Median', value: '$2,442', explanation: 'This is the minimum supplied median.' }],
+  caveats: ['Timing alone does not prove causation.'],
+  follow_up_questions: ['How does a smaller down payment change the result?'],
+});
+assert(summaryAnswer.evidence[0].date === '2028-01' && summaryAnswer.followUpQuestions.length === 1, 'Summary Ask validates a structured answer with evidence and follow-ups');
+const followUpPrompt = buildSummaryFollowUpPrompt('What if I delay the purchase by two years?');
+assert(followUpPrompt.task === 'follow_up_financial_simulation_analysis' && !('monthly_simulation_table' in followUpPrompt), 'Summary follow-up prompt continues the existing context without duplicating the table');
 
 // --- Tax progressivity ---
 const low = computeAnnualTax(50000, 'Default', 0);
@@ -105,6 +130,7 @@ const sim = new Simulator({
 const out = sim.run();
 
 assert(out.timeline.length === 36, 'timeline has one entry per month');
+assert(out.assetOnlyTimeline.length === 36, 'asset-only timeline has one entry per month');
 assert(out.timeline.every(t => t.p10 <= t.p50 && t.p50 <= t.p90), 'percentiles are monotonic (p10<=p50<=p90) every month');
 assert(out.solvencyRate >= 0 && out.solvencyRate <= 1, `solvencyRate in [0,1] (${out.solvencyRate})`);
 assert(out.fireStats && out.fireStats.fireNumber === 45000 * 25, `fireNumber = 25x annual living cost (${out.fireStats.fireNumber})`);
@@ -112,6 +138,7 @@ assert(out.fireStats.successRate >= 0 && out.fireStats.successRate <= 1, 'fire s
 assert(out.byAccountTypeTimeline.length === 36, 'composition timeline has one entry per month');
 assert(out.byAccountTimeline.length === 36, 'account-level composition timeline has one entry per month');
 assert(Object.keys(out.byAccountTimeline[0]).length === Object.keys(accounts).length, 'account-level composition includes every account');
+assert(out.assetOnlyTimeline.every((point, index) => point.p50 >= out.timeline[index].p50), 'asset-only median is never below debt-inclusive median');
 assert(out.individualTraces.length === 50, 'simulation exposes up to 50 representative individual paths');
 assert(out.individualTraces.every(trace => trace.length === 36), 'every individual path spans the full simulation');
 assert(out.individualTraces.every((trace, index) => trace.at(-1) === out.finalParticles[index].total()), 'individual path endpoints match final particle values');
@@ -119,6 +146,8 @@ assert(out.bankruptcyCount >= 0 && out.bankruptcyCount <= 50, 'summary exposes a
 assert(out.particleCount === 50, 'summary exposes the simulated path count');
 assert(out.endingBelowStartingCount >= 0 && out.endingBelowStartingCount <= 50, 'summary exposes a valid count of paths ending below their starting net worth');
 assert(out.maximumDebt >= 0, 'summary exposes maximum debt as a non-negative amount');
+assert(out.maximumDebtStats.p10 <= out.maximumDebtStats.p50 && out.maximumDebtStats.p50 <= out.maximumDebtStats.p90, 'peak-debt summary percentiles are monotonic');
+assert(out.maximumDebtStats.p90 <= out.maximumDebt, 'worst observed debt is at least the P90 peak debt');
 assert(out.retirementReadinessTimeline.length === 36, 'summary exposes retirement readiness for every month');
 assert(out.retirementReadinessTimeline.every(point => point.successRate >= 0 && point.successRate <= 1), 'retirement readiness probabilities stay in range');
 
@@ -195,13 +224,12 @@ assert(exported.format === 'financial-sims-scenario' && exported.version === 1, 
 assert(exported.name === 'Base case' && exported.settings.currentAge === '35', 'scenario export includes name and settings');
 assert(JSON.parse(JSON.stringify(exported)).state.accounts.length === Object.keys(accounts).length, 'scenario export is JSON-safe and includes accounts');
 
-const fs = await import('node:fs');
-const path = await import('node:path');
-const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
-const exampleImport = reviveScenarioExport(JSON.parse(fs.readFileSync(path.join(repoRoot, 'me.example.json'), 'utf8')));
-assert(exampleImport.name.length > 0, 'JSON import loads the me.example.json scenario name');
-assert(Object.keys(exampleImport.state.accounts).length === 6, 'JSON import loads all me.example.json accounts');
-assert(exampleImport.state.accounts.roth.balance === 500000, 'JSON import preserves me.example.json account balances');
+const exampleFixture = buildBaseScenario();
+const exampleFixtureJson = JSON.stringify(createScenarioExport(exampleFixture.name, exampleFixture.settings, exampleFixture.state, exampleFixture.notes));
+const exampleImport = reviveScenarioExport(JSON.parse(exampleFixtureJson));
+assert(exampleImport.name.length > 0, 'JSON import loads a scenario name');
+assert(Object.keys(exampleImport.state.accounts).length === 6, 'JSON import loads all example-fixture accounts');
+assert(exampleImport.state.accounts.roth.balance === 500000, 'JSON import preserves example-fixture account balances');
 
 // --- Debt appreciation smoke test ---
 const debtAccounts = defaultAccounts();
@@ -286,7 +314,7 @@ assert(baseOut.timeline.length === 24, 'base scenario simulates without throwing
       res.writeHead(404); res.end('not found');
     } else if (req.url === '/me.example.json') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(fs.readFileSync(path.join(repoRoot, 'me.example.json')));
+      res.end(exampleFixtureJson);
     } else if (req.url === '/bad.json') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end('{not valid json');

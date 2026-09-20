@@ -184,11 +184,13 @@ class ParticleState {
     this.marketEventOccurrences = marketEventOccurrences; // sampled once per path
     this.costBasis = costBasis; // {id: number} — tracked for 'taxable' accounts when capital-gains modeling is enabled
     this.netWorthHistory = netWorthHistory;
+    this.maximumDebt = 0;
     this.hasShortfall = false;
   }
   clone() {
     const clone = new ParticleState({ ...this.accountBalances }, this.blockAmounts, this.effectiveRatesByYear, this.marketEventOccurrences, { ...this.costBasis }, [...this.netWorthHistory]);
     clone.hasShortfall = this.hasShortfall;
+    clone.maximumDebt = this.maximumDebt;
     return clone;
   }
   total() {
@@ -267,6 +269,7 @@ export class Simulator {
     const pf = new ParticleFilter(particles, { enabled: this.useParticleFilter, essThresholdFraction: 0.5, resamplePenalty: 0.02 });
 
     const timeline = []; // per month: {p10,p50,p90,mean}
+    const assetOnlyTimeline = []; // financial assets only; excludes all debt balances
     const byAccountTypeTimeline = []; // per month: {checking,hysa,taxable,retirement,debt}
     const byAccountTimeline = []; // per month: mean balance keyed by account id
     const retirementReadinessTimeline = []; // per month: FIRE target + share of paths above it
@@ -352,8 +355,16 @@ export class Simulator {
       // --- collect stats for this month across the ensemble ---
       for (const particle of pf.particles) particle.netWorthHistory.push(particle.total());
       const totals = pf.particles.map(p => p.total()).sort((a, b) => a - b);
+      const assetTotals = pf.particles.map(p => Object.entries(accounts).reduce((sum, [id, account]) =>
+        account.type === 'debt' ? sum : sum + (p.accountBalances[id] || 0), 0)).sort((a, b) => a - b);
       const mean = totals.reduce((a, b) => a + b, 0) / totals.length;
       timeline.push({ p10: percentile(totals, 0.10), p50: percentile(totals, 0.50), p90: percentile(totals, 0.90), mean });
+      assetOnlyTimeline.push({
+        p10: percentile(assetTotals, 0.10),
+        p50: percentile(assetTotals, 0.50),
+        p90: percentile(assetTotals, 0.90),
+        mean: assetTotals.reduce((a, b) => a + b, 0) / assetTotals.length,
+      });
 
       const monthlyFireNumber = this._fireNumberAt(m);
       retirementReadinessTimeline.push({
@@ -366,6 +377,7 @@ export class Simulator {
       for (const p of pf.particles) {
         const debt = Object.entries(accounts).reduce((sum, [id, account]) =>
           account.type === 'debt' ? sum + Math.max(0, -(p.accountBalances[id] || 0)) : sum, 0);
+        p.maximumDebt = Math.max(p.maximumDebt, debt);
         maximumDebt = Math.max(maximumDebt, debt);
         for (const [id, acc] of Object.entries(accounts)) {
           const meanContribution = p.accountBalances[id] / pf.particles.length;
@@ -391,6 +403,7 @@ export class Simulator {
     const startingNetWorth = Object.values(accounts).reduce((sum, account) => sum + Number(account.balance || 0), 0);
     const bankruptCount = pf.particles.filter((p, index) => p.hasShortfall || finalTotals[index] < 0).length;
     const endingBelowStartingCount = finalTotals.filter(total => total < startingNetWorth).length;
+    const peakDebts = pf.particles.map(particle => particle.maximumDebt).sort((a, b) => a - b);
     const solvencyRate = 1 - bankruptCount / finalTotals.length;
 
     const fireStats = fireSuccessRate != null
@@ -403,6 +416,7 @@ export class Simulator {
 
     return {
       timeline,
+      assetOnlyTimeline,
       byAccountTypeTimeline,
       byAccountTimeline,
       retirementReadinessTimeline,
@@ -411,6 +425,11 @@ export class Simulator {
       particleCount: this.numParticles,
       endingBelowStartingCount,
       maximumDebt,
+      maximumDebtStats: {
+        p10: percentile(peakDebts, 0.10),
+        p50: percentile(peakDebts, 0.50),
+        p90: percentile(peakDebts, 0.90),
+      },
       resampleEvents,
       fireStats,
       marketEventStats: this.marketEvents.map(event => ({

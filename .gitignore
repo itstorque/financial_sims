@@ -3,6 +3,7 @@
 # Scenarios panel) and saving it here as me.json. See me.example.json for the
 # expected shape/format.
 me.json
+me.example.json
 
 # OS/editor cruft
 .DS_Store

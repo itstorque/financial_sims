@@ -3,8 +3,8 @@
 // available afterward as a named scenario to reload). All figures below are
 // stated assumptions — meant to be edited, not treated as advice.
 //
-// Household: both partners 25 today. Partner A earns $160k/yr (salary,
-// cash/pre-tax), Partner B earns $240k/yr (salary, cash/pre-tax), plus $60k/yr
+// Household: both partners 25 today. Partner A earns $150k/yr (salary,
+// cash/pre-tax), Partner B earns $90k/yr (salary, cash/pre-tax), plus $60k/yr
 // in stock compensation (RSUs, treated as pre-tax ordinary income landing in
 // a taxable brokerage). Plans to buy a $1.2M SF house in Jan 2028 (20% down,
 // ~6.75% 30-yr fixed — a rough "typical" SF rate assumption), and to have two
@@ -62,11 +62,11 @@ export function buildBaseScenario() {
   const blocks = [
     createBlock({
       category: 'income', kind: 'continuous', description: 'Partner A salary',
-      amount: 160000, startMonth: monthsFromNow(0), preTax: true, targetAccountId: checking.id,
+      amount: 150000, startMonth: monthsFromNow(0), preTax: true, targetAccountId: checking.id,
     }),
     createBlock({
       category: 'income', kind: 'continuous', description: 'Partner B salary',
-      amount: 240000, startMonth: monthsFromNow(0), preTax: true, targetAccountId: checking.id,
+      amount: 90000, startMonth: monthsFromNow(0), preTax: true, targetAccountId: checking.id,
     }),
     createBlock({
       category: 'income', kind: 'continuous', description: 'Stock compensation (RSUs)',
@@ -108,7 +108,7 @@ export function buildBaseScenario() {
   const notes = [
     'ASSUMPTIONS (edit freely):',
     '- Both partners are 25 today. Retirement age set to 55 as a placeholder FIRE target — change as desired.',
-    '- Partner A: $160k/yr salary (pre-tax, cash). Partner B: $240k/yr salary (pre-tax, cash). Plus $60k/yr RSU/stock comp (pre-tax, ~15% amount volatility, vests into the taxable brokerage).',
+    '- Partner A: $150k/yr salary (pre-tax, cash). Partner B: $90k/yr salary (pre-tax, cash). Plus $60k/yr RSU/stock comp (pre-tax, ~15% amount volatility, vests into the taxable brokerage).',
     `- Living costs (excl. housing): $70k/yr, 5% noise. Adjust to match your real budget.`,
     `- House: $1.2M in San Francisco, purchase month ${purchaseMonth}, 20% down ($240k) from Savings (HYSA), 30-yr fixed at 6.75% (a rough "typical SF rate" placeholder — check current rates). Note: the down payment exceeds the $200k starting Savings balance, so by the purchase date it relies on savings built up from income between now and then (or edit the plan if you want a smaller/larger cushion).`,
       `- Kid 1: born ~${kid1BirthMonth} (6 years from now). Kid 2: born ~${kid2BirthMonth} (8 years from now). Each modeled with an SF-calibrated cost-of-living curve by age (infant/toddler daycare years are the most expensive) — see childCostModel.js. These are illustrative, not sourced from real SF childcare pricing data.`,

@@ -109,13 +109,85 @@ export function validateTrackEdit(value, { window, trackId }) {
   };
 }
 
+export function buildSummaryQuestionPrompt({ question, summary, simulationInputs, planEvents, monthlyTableCsv, tableMetadata }) {
+  return {
+    task: 'analyze_financial_simulation',
+    user_question: question,
+    summary_metrics: summary,
+    simulation_inputs: simulationInputs,
+    configured_plan_events: planEvents,
+    monthly_simulation_table: {
+      format: 'CSV',
+      metadata: tableMetadata,
+      data: monthlyTableCsv,
+    },
+    instructions: [
+      'Answer the user question using only the supplied simulation data and plan configuration.',
+      'The simulation_inputs object is the complete input snapshot used for this run: run settings, accounts, account return schedules, cash-flow blocks, global returns, market events, and withdrawal order.',
+      'Use the monthly table for date-specific claims and cite exact dates and values.',
+      'When explaining why a balance changes, distinguish observed timing/correlation from proven causation.',
+      'The p10, median, p90, and mean columns are simulated net worth. Account columns are mean balances, not median balances.',
+      'Be concise, practical, and explicit when the supplied data cannot establish a cause.',
+      'Do not claim guaranteed returns or outcomes. This is planning analysis, not individualized financial advice.',
+      'Return exactly one JSON object and no Markdown.',
+    ],
+    output_shape: {
+      answer: 'plain-text answer, up to 1800 characters',
+      evidence: [{ date: 'YYYY-MM or empty', metric: 'string', value: 'string', explanation: 'string' }],
+      caveats: ['short string'],
+      follow_up_questions: ['short string'],
+    },
+  };
+}
+
+export function buildSummaryFollowUpPrompt(question) {
+  return {
+    task: 'follow_up_financial_simulation_analysis',
+    user_question: question,
+    instructions: [
+      'Continue the existing analysis using the simulation table and prior conversation already provided.',
+      'Use exact dates and values for data claims, and distinguish correlation from proven causation.',
+      'Be concise and practical. Return exactly one JSON object and no Markdown.',
+    ],
+    output_shape: {
+      answer: 'plain-text answer, up to 1800 characters',
+      evidence: [{ date: 'YYYY-MM or empty', metric: 'string', value: 'string', explanation: 'string' }],
+      caveats: ['short string'],
+      follow_up_questions: ['short string'],
+    },
+  };
+}
+
+export function validateSummaryAnswer(value) {
+  const root = requireObject(value, 'Response');
+  const answer = String(root.answer || '').trim().slice(0, 3000);
+  if (!answer) throw new Error('DeepSeek returned an empty answer.');
+  const evidence = Array.isArray(root.evidence) ? root.evidence.slice(0, 8).map((item, index) => {
+    requireObject(item, `evidence[${index}]`);
+    return {
+      date: String(item.date || '').trim().slice(0, 20),
+      metric: String(item.metric || '').trim().slice(0, 100),
+      value: String(item.value || '').trim().slice(0, 100),
+      explanation: String(item.explanation || '').trim().slice(0, 300),
+    };
+  }) : [];
+  const cleanList = value => Array.isArray(value) ? value.slice(0, 5).map(item => String(item || '').trim().slice(0, 300)).filter(Boolean) : [];
+  return {
+    answer,
+    evidence,
+    caveats: cleanList(root.caveats),
+    followUpQuestions: cleanList(root.follow_up_questions),
+  };
+}
+
 function parseModelJson(content) {
   const text = String(content || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   try { return JSON.parse(text); } catch { throw new Error('DeepSeek did not return valid JSON. Try a more specific prompt.'); }
 }
 
-export async function requestDeepSeek(apiKey, prompt) {
+export async function requestDeepSeekConversation(apiKey, messages) {
   if (!apiKey) throw new Error('Add a DeepSeek API key in Simulation settings first.');
+  if (!Array.isArray(messages) || !messages.length) throw new Error('DeepSeek conversation is empty.');
   const response = await fetch('https://api.deepseek.com/chat/completions', {
     method: 'POST',
     headers: {
@@ -127,13 +199,19 @@ export async function requestDeepSeek(apiKey, prompt) {
       temperature: 0.2,
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: 'You convert financial planning requests into strict JSON. Return only the requested JSON object. Never include prose or Markdown.' },
-        { role: 'user', content: JSON.stringify(prompt) },
+        { role: 'system', content: 'You analyze financial simulations from supplied data. Return only the requested strict JSON object. Never include Markdown.' },
+        ...messages,
       ],
     }),
   });
   let body;
   try { body = await response.json(); } catch { body = null; }
   if (!response.ok) throw new Error(body?.error?.message || `DeepSeek request failed (${response.status}).`);
-  return parseModelJson(body?.choices?.[0]?.message?.content);
+  const content = body?.choices?.[0]?.message?.content;
+  return { value: parseModelJson(content), assistantContent: String(content || '') };
+}
+
+export async function requestDeepSeek(apiKey, prompt) {
+  const response = await requestDeepSeekConversation(apiKey, [{ role: 'user', content: JSON.stringify(prompt) }]);
+  return response.value;
 }

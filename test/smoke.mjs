@@ -13,6 +13,7 @@ import { createMarketEvent, sampleMarketEvents, eventAppliesToAccount } from '..
 import { accountColumnKey, buildResultsDataFrameRows, rowsToCsv, buildPythonSnippet } from '../src/exportData.js';
 import { buildTrackPrompt, buildTrackEditPrompt, validateTrackCreation, validateTrackEdit, buildSummaryQuestionPrompt, buildSummaryFollowUpPrompt, validateSummaryAnswer } from '../src/deepseek.js';
 import { renderMarkdown } from '../src/markdown.js';
+import { createSeededRandom, distributionHistogram, distributionMean, distributionRange, sampleShock } from '../src/distributions.js';
 
 let failures = 0;
 function assert(cond, msg) {
@@ -33,7 +34,7 @@ assert(createPrompt.task === 'create_cash_flow_track' && createPrompt.output_sha
 const aiTrack = validateTrackCreation({
   operation: 'add_track',
   track: {
-    description: 'Childcare', category: 'expense', inflationAdjusted: true, accountId: 'checking-1',
+    description: 'Childcare', category: 'expense', inflationAdjusted: true, accountId: 'checking-1', annualGrowthRate: 0.01,
     clips: [
       { from: '2026-01', to: '2030-12', name: 'Full-time care', annualAmount: 36000 },
       { from: '2031-01', to: '2035-12', name: 'After-school care', annualAmount: 12000 },
@@ -41,6 +42,7 @@ const aiTrack = validateTrackCreation({
   },
 }, { window: aiWindow, accountIds: ['checking-1'] });
 assert(aiTrack.category === 'expense' && aiTrack.clips.length === 2, 'Smart Cell JSON validates into a cash-flow track');
+assert(aiTrack.annualGrowthRate === 0, 'Smart Cell ignores annual income growth for expense tracks');
 const editPrompt = buildTrackEditPrompt({ request: 'Pause in 2032', window: aiWindow, track: { id: 'track-1', clips: aiTrack.clips }, selectedClipIndex: 1 });
 assert(editPrompt.task === 'edit_cash_flow_schedule' && editPrompt.current_track.id === 'track-1', 'Smart Edit prompt includes the selected track as JSON context');
 const aiEdit = validateTrackEdit({
@@ -107,6 +109,41 @@ assert(spliceScheduleClip(clips, 0, '2028-01') === true, 'splice accepts a month
 assert(clips[0].to === '2027-12' && clips[1].from === '2028-01' && clips[1].annualAmount === firstClipAmount, 'splice creates contiguous clips and preserves settings');
 assert(spliceScheduleClip(clips, 0, clips[0].from) === false, 'splice rejects a cut at the clip start');
 
+// --- Seeded distributions and annual cash-flow uncertainty ---
+const sequenceA = createSeededRandom('repeatable');
+const sequenceB = createSeededRandom('repeatable');
+assert(Array.from({ length: 20 }, sequenceA).join(',') === Array.from({ length: 20 }, sequenceB).join(','), 'same seed produces the same random sequence');
+const tRandom = createSeededRandom('student-t');
+const tDraws = Array.from({ length: 100 }, () => sampleShock({ family: 'studentT', scale: 0.1, degreesOfFreedom: 5 }, tRandom));
+assert(tDraws.every(Number.isFinite), 'Student-t sampler produces finite shocks');
+const previewHistogram = distributionHistogram({ family: 'studentT', scale: 0.1, degreesOfFreedom: 5 });
+assert(previewHistogram.bins.length === 36 && previewHistogram.bins.every(value => value >= 0 && value <= 1), 'distribution preview creates normalized histogram bins');
+assert(previewHistogram.min < 0 && previewHistogram.max > 0 && previewHistogram.expectedPosition > 0 && previewHistogram.expectedPosition < 1, 'distribution preview spans expected downside and upside outcomes');
+assert(JSON.stringify(previewHistogram) === JSON.stringify(distributionHistogram({ family: 'studentT', scale: 0.1, degreesOfFreedom: 5 })), 'distribution preview is deterministic for stable editor rendering');
+assert(Math.abs(sampleShock({ family: 'uniform', low: -0.2, high: 0.4 }, () => 0.25) - (-0.05)) < 1e-12, 'continuous uniform samples evenly between user-selected bounds');
+assert(sampleShock({ family: 'discreteUniform', values: [-0.25, 0, 0.5] }, () => 0) === -0.25, 'discrete uniform can select the first user-specified outcome');
+assert(sampleShock({ family: 'discreteUniform', values: [-0.25, 0, 0.5] }, () => 0.99) === 0.5, 'discrete uniform can select the last user-specified outcome');
+const uniformPreview = distributionHistogram({ family: 'uniform', low: -0.2, high: 0.4 });
+assert(uniformPreview.min >= -0.2 && uniformPreview.max <= 0.4, 'continuous uniform preview remains inside configured bounds');
+const discretePreview = distributionHistogram({ family: 'discreteUniform', values: [-0.25, 0, 0.5] });
+assert(discretePreview.bins.filter(value => value > 0).length <= 3, 'discrete uniform preview shows only the chosen outcomes');
+assert(Math.abs(distributionMean({ family: 'uniform', low: -0.01, high: 0.03 }) - 0.01) < 1e-12, 'continuous uniform mean supports average growth projections');
+assert(Math.abs(distributionMean({ family: 'discreteUniform', values: [-0.01, 0.01, 0.06] }) - 0.02) < 1e-12, 'discrete uniform mean supports average growth projections');
+assert(distributionRange({ family: 'normal', scale: 0 }).min === 0 && distributionRange({ family: 'normal', scale: 0 }).max === 0, 'zero uncertainty produces no projected error envelope');
+assert(distributionRange({ family: 'uniform', low: -0.01, high: 0.03 }).min === -0.01 && distributionRange({ family: 'uniform', low: -0.01, high: 0.03 }).max === 0.03, 'uniform bounds drive projected track error envelopes');
+const uncertainAnnualBlock = createBlock({ category: 'expense', kind: 'continuous', amount: 12000, startMonth: '2026-01', uncertainty: { family: 'normal', scale: 0.1 } });
+const annualAmounts = precomputeBlockAmounts([uncertainAnnualBlock], '2026-01-01', 24, 0, createSeededRandom('cash-flow'));
+assert(annualAmounts.slice(0, 12).every(row => row[uncertainAnnualBlock.id] === annualAmounts[0][uncertainAnnualBlock.id]), 'annual cash-flow uncertainty is sampled once and shared by all months in the year');
+assert(annualAmounts[12][uncertainAnnualBlock.id] !== annualAmounts[0][uncertainAnnualBlock.id], 'annual cash-flow uncertainty is redrawn in the next calendar year');
+const growingIncome = createBlock({ category: 'income', kind: 'continuous', amount: 12000, startMonth: '2026-06', annualGrowthRate: 0.01, growthUncertainty: { family: 'normal', scale: 0 } });
+const growingAmounts = precomputeBlockAmounts([growingIncome], '2026-06-01', 25, 0, createSeededRandom('income-growth'));
+assert(growingAmounts.slice(0, 12).every(row => row[growingIncome.id] === 1000), 'income stays at its starting annual amount before the first anniversary');
+assert(growingAmounts.slice(12, 24).every(row => Math.abs(row[growingIncome.id] - 1010) < 1e-9), 'a 1% income increase begins on the first anniversary and lasts one year');
+assert(Math.abs(growingAmounts[24][growingIncome.id] - 1020.1) < 1e-9, 'annual income increases compound on later anniversaries');
+const growingIncomeWithError = createBlock({ category: 'income', kind: 'continuous', amount: 12000, startMonth: '2026-01', annualGrowthRate: 0.01, growthUncertainty: { family: 'uniform', low: 0.02, high: 0.02 } });
+const growingWithErrorAmounts = precomputeBlockAmounts([growingIncomeWithError], '2026-01-01', 13, 0, createSeededRandom('income-growth-error'));
+assert(Math.abs(growingWithErrorAmounts[12][growingIncomeWithError.id] - 1030) < 1e-9, 'income growth error is added to the expected annual increase');
+
 // --- Simulation smoke test ---
 const accounts = defaultAccounts();
 const blocks = [
@@ -150,6 +187,8 @@ assert(out.maximumDebtStats.p10 <= out.maximumDebtStats.p50 && out.maximumDebtSt
 assert(out.maximumDebtStats.p90 <= out.maximumDebt, 'worst observed debt is at least the P90 peak debt');
 assert(out.retirementReadinessTimeline.length === 36, 'summary exposes retirement readiness for every month');
 assert(out.retirementReadinessTimeline.every(point => point.successRate >= 0 && point.successRate <= 1), 'retirement readiness probabilities stay in range');
+assert(out.inflationTimeline.length === 36, 'simulation exposes a path-wide inflation index for every month');
+assert(out.individualTraceMeta.length === out.individualTraces.length, 'each displayed trajectory includes failure metadata');
 
 // --- Cross-account drawdown ---
 const drawdownAccounts = {
@@ -172,6 +211,12 @@ const shortfallBlock = createBlock({ category: 'expense', kind: 'one-time', desc
 const shortfallOut = new Simulator({ startDate: '2026-01-01', months: 1, accounts: shortfallAccounts, blocks: [shortfallBlock], globalReturnsSchedule: new ReturnsSchedule([], { defaultAnnual: 0, defaultSigma: 0 }), numParticles: 10, useParticleFilter: false }).run();
 assert(shortfallOut.finalParticles.every(p => Object.values(p.accountBalances).every(balance => balance >= 0)), 'asset accounts never become negative when funds are insufficient');
 assert(shortfallOut.solvencyRate === 0, 'an unpaid withdrawal shortfall marks the path insolvent');
+assert(shortfallOut.individualTraceMeta.every(path => path.failed && path.failureMonthIndex === 0), 'failed trajectories remain exposed with their first shortfall month');
+
+const reproducibleOptions = { startDate: '2026-01-01', months: 12, accounts, blocks, globalReturnsSchedule: defaultReturnsSchedule(), numParticles: 10, useParticleFilter: false, seed: 'scenario-a' };
+const seededRunA = new Simulator(reproducibleOptions).run();
+const seededRunB = new Simulator(reproducibleOptions).run();
+assert(JSON.stringify(seededRunA.timeline) === JSON.stringify(seededRunB.timeline), 'the same scenario seed reproduces the complete percentile timeline');
 
 // --- Rare probabilistic market events ---
 const certainCrash = createMarketEvent({ name: 'Certain test crash', probability: 1, triggerWindowMonths: 1, durationMonths: 1, annualReturn: -1.2, sigma: 0, scope: 'investments' });
@@ -219,8 +264,24 @@ assert(revivedBlock.amountSchedule.entries.length === 3, 'revived block preserve
 assert(nominalMonthlyAmount(revivedBlock, new Date(2038, 0, 1)) === 0, 'revived amount schedule still evaluates correctly (last-match-wins $0 tail)');
 assert(nominalMonthlyAmount(revivedBlock, new Date(2027, 5, 1)) === 120000 / 12, 'revived amount schedule still evaluates correctly (first segment)');
 
+const uniformState = {
+  accounts,
+  blocks: [
+    createBlock({ category: 'expense', kind: 'continuous', amount: 12000, startMonth: '2026-01', uncertainty: { family: 'uniform', low: -0.15, high: 0.30 } }),
+    createBlock({ category: 'income', kind: 'continuous', amount: 50000, startMonth: '2026-01', uncertainty: { family: 'discreteUniform', values: [-0.25, 0, 0.4] } }),
+  ],
+  globalReturnsSchedule: defaultReturnsSchedule(),
+};
+const revivedUniformState = reviveState(JSON.parse(JSON.stringify(serializeState(uniformState))));
+assert(revivedUniformState.blocks[0].uncertainty.low === -0.15 && revivedUniformState.blocks[0].uncertainty.high === 0.30, 'continuous uniform bounds survive persistence');
+assert(revivedUniformState.blocks[1].uncertainty.values.join(',') === '-0.25,0,0.4', 'discrete uniform outcomes survive persistence');
+const growthState = { accounts, blocks: [growingIncomeWithError], globalReturnsSchedule: defaultReturnsSchedule() };
+const revivedGrowthState = reviveState(JSON.parse(JSON.stringify(serializeState(growthState))));
+assert(revivedGrowthState.blocks[0].annualGrowthRate === 0.01, 'annual income increase survives persistence');
+assert(revivedGrowthState.blocks[0].growthUncertainty.low === 0.02 && revivedGrowthState.blocks[0].growthUncertainty.high === 0.02, 'income increase error bars survive persistence');
+
 const exported = createScenarioExport('Base case', { currentAge: '35' }, stateForSave);
-assert(exported.format === 'financial-sims-scenario' && exported.version === 1, 'scenario export includes format and version');
+assert(exported.format === 'financial-sims-scenario' && exported.version === 2, 'scenario export includes format and version');
 assert(exported.name === 'Base case' && exported.settings.currentAge === '35', 'scenario export includes name and settings');
 assert(JSON.parse(JSON.stringify(exported)).state.accounts.length === Object.keys(accounts).length, 'scenario export is JSON-safe and includes accounts');
 
@@ -230,6 +291,8 @@ const exampleImport = reviveScenarioExport(JSON.parse(exampleFixtureJson));
 assert(exampleImport.name.length > 0, 'JSON import loads a scenario name');
 assert(Object.keys(exampleImport.state.accounts).length === 6, 'JSON import loads all example-fixture accounts');
 assert(exampleImport.state.accounts.roth.balance === 500000, 'JSON import preserves example-fixture account balances');
+const legacyImport = reviveScenarioExport({ ...JSON.parse(exampleFixtureJson), version: 1 });
+assert(legacyImport.state.globalReturnsSchedule.defaultDistribution.family === 'normal', 'v1 scenarios migrate legacy sigma values to normal distributions');
 
 // --- Debt appreciation smoke test ---
 const debtAccounts = defaultAccounts();

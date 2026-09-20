@@ -25,7 +25,7 @@ export function effectiveSampleSize(weights) {
 }
 
 /** Systematic resampling: returns an array of indices to draw from `particles`. */
-export function systematicResampleIndices(weights) {
+export function systematicResampleIndices(weights, random = Math.random) {
   const n = weights.length;
   const sum = weights.reduce((a, b) => a + b, 0);
   if (sum === 0) return weights.map((_, i) => i); // degenerate: keep as-is
@@ -34,7 +34,7 @@ export function systematicResampleIndices(weights) {
   let acc = 0;
   for (const w of norm) { acc += w; cumulative.push(acc); }
 
-  const start = Math.random() / n;
+  const start = random() / n;
   const indices = new Array(n);
   let j = 0;
   for (let i = 0; i < n; i++) {
@@ -51,12 +51,13 @@ export function systematicResampleIndices(weights) {
  * drops below a threshold (fraction of N).
  */
 export class ParticleFilter {
-  constructor(particles, { essThresholdFraction = 0.5, resamplePenalty = 0.02, enabled = true } = {}) {
+  constructor(particles, { essThresholdFraction = 0.5, resamplePenalty = 0.02, enabled = true, random = Math.random } = {}) {
     this.particles = particles;
     this.weights = new Array(particles.length).fill(1);
     this.essThresholdFraction = essThresholdFraction;
     this.resamplePenalty = resamplePenalty;
     this.enabled = enabled;
+    this.random = random;
   }
 
   /** Update weights from a scoring function `scoreFn(particle) -> totalBalance`. */
@@ -71,7 +72,7 @@ export class ParticleFilter {
     const n = this.particles.length;
     const ess = effectiveSampleSize(this.weights);
     if (ess < this.essThresholdFraction * n) {
-      const idx = systematicResampleIndices(this.weights);
+      const idx = systematicResampleIndices(this.weights, this.random);
       this.particles = idx.map(i => cloneFn(this.particles[i]));
       this.weights = new Array(n).fill(1);
       return true;

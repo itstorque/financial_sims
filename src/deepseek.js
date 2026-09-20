@@ -14,11 +14,22 @@ function validateClips(clips, window) {
     if (clip.from < window.from || clip.to > window.to) throw new Error(`Clip ${index + 1} falls outside ${window.from} to ${window.to}.`);
     const annualAmount = Number(clip.annualAmount);
     if (!Number.isFinite(annualAmount) || annualAmount < 0) throw new Error(`Clip ${index + 1} needs a non-negative annualAmount.`);
+    const uncertainty = clip.uncertainty && typeof clip.uncertainty === 'object'
+      ? {
+          family: ['normal', 'lognormal', 'studentT', 'triangular', 'uniform', 'discreteUniform'].includes(clip.uncertainty.family) ? clip.uncertainty.family : 'normal',
+          scale: Math.min(1, Math.max(0, Number(clip.uncertainty.scale) || 0)),
+          degreesOfFreedom: Math.max(2.01, Number(clip.uncertainty.degreesOfFreedom) || 7),
+          low: Math.max(-1, Number(clip.uncertainty.low) || 0),
+          high: Number(clip.uncertainty.high) || 0,
+          values: Array.isArray(clip.uncertainty.values) ? clip.uncertainty.values.map(Number).filter(Number.isFinite) : undefined,
+        }
+      : null;
     return {
       from: clip.from,
       to: clip.to,
       name: String(clip.name || `Clip ${index + 1}`).trim().slice(0, 120) || `Clip ${index + 1}`,
       annualAmount,
+      ...(uncertainty ? { uncertainty } : {}),
     };
   }).sort((a, b) => a.from.localeCompare(b.from));
   for (let index = 1; index < normalized.length; index++) {
@@ -38,6 +49,7 @@ export function buildTrackPrompt({ request, window, accounts }) {
       'Amounts are non-negative annual US-dollar amounts. Use category to indicate income versus expense.',
       'Dates are inclusive YYYY-MM values inside the simulation window.',
       'Use multiple non-overlapping clips for changes over time. Use annualAmount 0 for pauses.',
+      'Optional clip uncertainty applies to the reported annual amount and is sampled once per calendar year. scale is a decimal fraction such as 0.10 for 10%.',
       'Use an accountId from available_accounts, or null when no account is appropriate.',
     ],
     output_shape: {
@@ -48,8 +60,10 @@ export function buildTrackPrompt({ request, window, accounts }) {
         preTax: 'boolean; relevant to income',
         inflationAdjusted: 'boolean',
         sigma: 'number from 0 to 0.5',
+        annualGrowthRate: 'decimal annual increase for income, e.g. 0.01 for 1%',
+        growthUncertainty: { family: 'normal | lognormal | studentT | triangular | uniform | discreteUniform', scale: 'decimal error around annual increase', low: 'optional decimal error', high: 'optional decimal error', values: ['optional equally likely decimal errors'] },
         accountId: 'available account id or null',
-        clips: [{ from: 'YYYY-MM', to: 'YYYY-MM', name: 'string', annualAmount: 'number' }],
+        clips: [{ from: 'YYYY-MM', to: 'YYYY-MM', name: 'string', annualAmount: 'number', uncertainty: { family: 'normal | lognormal | studentT | triangular | uniform | discreteUniform', scale: 'number from 0 to 1', low: 'optional decimal change', high: 'optional decimal change', values: ['optional equally likely decimal changes'] } }],
       },
     },
   };
@@ -67,13 +81,14 @@ export function buildTrackEditPrompt({ request, window, track, selectedClipIndex
       'Return the complete replacement clips list, including unchanged clips.',
       'Amounts are non-negative annual US-dollar amounts and dates are inclusive YYYY-MM values.',
       'Clips must not overlap and must stay inside the simulation window. Use annualAmount 0 for pauses.',
+      'Preserve or update optional clip uncertainty when requested; it applies to the annual amount.',
       'Do not change the track id, category, account, tax, inflation, or volatility settings.',
     ],
     output_shape: {
       operation: 'replace_schedule',
       trackId: track.id,
       description: 'string; omit to keep unchanged',
-      clips: [{ from: 'YYYY-MM', to: 'YYYY-MM', name: 'string', annualAmount: 'number' }],
+      clips: [{ from: 'YYYY-MM', to: 'YYYY-MM', name: 'string', annualAmount: 'number', uncertainty: { family: 'normal | lognormal | studentT | triangular | uniform | discreteUniform', scale: 'number from 0 to 1', low: 'optional decimal change', high: 'optional decimal change', values: ['optional equally likely decimal changes'] } }],
     },
   };
 }
@@ -95,6 +110,10 @@ export function validateTrackCreation(value, { window, accountIds }) {
     preTax: track.category === 'income' && track.preTax === true,
     inflationAdjusted: track.inflationAdjusted !== false,
     sigma,
+    annualGrowthRate: track.category === 'income' ? Number(track.annualGrowthRate) || 0 : 0,
+    growthUncertainty: track.category === 'income' && track.growthUncertainty && typeof track.growthUncertainty === 'object'
+      ? track.growthUncertainty
+      : { family: 'normal', scale: 0 },
     accountId,
     clips: validateClips(track.clips, window),
   };

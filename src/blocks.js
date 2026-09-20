@@ -27,10 +27,14 @@
 // contributed and federal/state income tax is deferred — FICA still applies).
 // false = amount is already NET/post-tax and is credited in full.
 //
-// `sigma` (optional, fraction e.g. 0.05) adds independent noise to the amount
-// each month it applies, propagated through the particle simulation.
+// `uncertainty` applies to the amount in the unit shown to the user. Recurring
+// amounts are annual, so one annual draw is shared across that calendar year's
+// active months. Legacy `sigma` values become normal uncertainty.
+// `annualGrowthRate` and `growthUncertainty` optionally compound recurring
+// income at each anniversary, independently of global inflation escalation.
 
 import { monthlyPI } from './affordability.js';
+import { normalizeDistribution, sampleRelativeValue } from './distributions.js';
 
 let _idCounter = 0;
 export function nextBlockId() {
@@ -80,6 +84,7 @@ export function buildScheduleClips(entries, startMonth, endMonth) {
         to: key,
         name: source?.name || '',
         annualAmount,
+        uncertainty: source?.uncertainty ? { ...source.uncertainty } : null,
       };
     } else {
       active.to = key;
@@ -92,6 +97,7 @@ export function buildScheduleClips(entries, startMonth, endMonth) {
     to: clip.to,
     name: clip.name || (clip.annualAmount === 0 ? 'Paused' : `Clip ${index + 1}`),
     annualAmount: clip.annualAmount,
+    ...(clip.uncertainty ? { uncertainty: { ...clip.uncertainty } } : {}),
   }));
 }
 
@@ -128,10 +134,13 @@ export class AmountSchedule {
     this.entries = entries.map(e => ({ ...e }));
   }
   getAnnualAmountFor(date) {
+    return Number(this.getEntryFor(date)?.annualAmount) || 0;
+  }
+  getEntryFor(date) {
     const key = monthKey(date);
-    let result = 0;
+    let result = null;
     for (const e of this.entries) {
-      if (e.from <= key && key <= e.to) result = Number(e.annualAmount) || 0;
+      if (e.from <= key && key <= e.to) result = e;
     }
     return result;
   }
@@ -144,6 +153,8 @@ export function createBlock({
   id, category, kind = 'continuous', description = '', amount = 0,
   startMonth, endMonth = null, preTax = false, targetAccountId = null,
   sourceAccountId = null, debtAccountId = null, sigma = 0,
+  uncertainty = null,
+  annualGrowthRate = 0, growthUncertainty = null,
   useCustomSchedule = false, amountSchedule = null, inflationAdjusted = true,
 } = {}) {
   return {
@@ -159,6 +170,13 @@ export function createBlock({
     sourceAccountId,   // where an expense/debt-payment is drawn from (defaults to first checking-like account)
     debtAccountId,     // optional: an expense that also pays down a debt account
     sigma: Number(sigma) || 0,
+    // Cash-flow amounts are expressed annually, so uncertainty is sampled on
+    // that annual value once per calendar year (or once for a one-time item).
+    uncertainty: normalizeDistribution(uncertainty, sigma),
+    // Optional annual raise/growth applied at each anniversary of an income
+    // block (or clip). The realized rate is redrawn once for each year.
+    annualGrowthRate: category === 'income' ? Number(annualGrowthRate) || 0 : 0,
+    growthUncertainty: normalizeDistribution(growthUncertainty, 0),
     useCustomSchedule: !!useCustomSchedule, // continuous blocks only
     // Whether this block's nominal amount escalates with the global inflation
     // rate over the course of the simulation (see sim.js precomputeBlockAmounts).
@@ -248,21 +266,16 @@ export function nominalMonthlyAmount(block, date) {
   return block.amount / 12;
 }
 
-function randNormal(mu = 0, sigma = 1) {
-  let u = 0, v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
-  const z = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
-  return z * sigma + mu;
+export function uncertaintyForBlockDate(block, date) {
+  const clip = block.useCustomSchedule ? block.amountSchedule?.getEntryFor(date) : null;
+  return normalizeDistribution(clip?.uncertainty || block.uncertainty, block.sigma);
 }
 
-/** Sampled monthly amount including optional Gaussian noise (sigma is a fraction of amount). */
-export function sampledMonthlyAmount(block, date) {
+/** Sample one month's amount directly. Simulations normally sample the annual
+ * reported value once and reuse it for every month in that calendar year. */
+export function sampledMonthlyAmount(block, date, random = Math.random) {
   const nominal = nominalMonthlyAmount(block, date);
-  if (!block.sigma) return nominal;
-  const noisy = nominal * (1 + randNormal(0, block.sigma));
-  // Don't let noise flip the sign of a normally-positive amount.
-  return nominal >= 0 ? Math.max(0, noisy) : Math.min(0, noisy);
+  return sampleRelativeValue(nominal, uncertaintyForBlockDate(block, date), random);
 }
 
 

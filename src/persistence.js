@@ -10,13 +10,14 @@ const AUTOSAVE_KEY = 'finSim.autosave.v1';
 const SCENARIOS_KEY = 'finSim.scenarios.v1';
 
 function serializeReturnsSchedule(rs) {
-  return { entries: rs.entries.map(e => ({ ...e })), defaultAnnual: rs.defaultAnnual, defaultSigma: rs.defaultSigma };
+  return { entries: rs.entries.map(e => ({ ...e })), defaultAnnual: rs.defaultAnnual, defaultSigma: rs.defaultSigma, defaultDistribution: rs.defaultDistribution };
 }
 
 function reviveReturnsSchedule(data) {
   return new ReturnsSchedule((data && data.entries) || [], {
     defaultAnnual: data?.defaultAnnual ?? 0.06,
     defaultSigma: data?.defaultSigma ?? 0.08,
+    defaultDistribution: data?.defaultDistribution,
   });
 }
 
@@ -39,7 +40,7 @@ export function serializeState(state) {
 export function createScenarioExport(name, settings, state, notes = '') {
   return {
     format: 'financial-sims-scenario',
-    version: 1,
+    version: 2,
     name: name || 'Untitled scenario',
     exportedAt: new Date().toISOString(),
     settings: { ...settings },
@@ -52,7 +53,7 @@ export function createScenarioExport(name, settings, state, notes = '') {
 export function reviveScenarioExport(data) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Scenario file must contain a JSON object.');
   if (data.format !== 'financial-sims-scenario') throw new Error('This is not a Financial Simulator scenario file.');
-  if (data.version !== 1) throw new Error(`Unsupported scenario version: ${data.version ?? 'missing'}.`);
+  if (data.version !== 1 && data.version !== 2) throw new Error(`Unsupported scenario version: ${data.version ?? 'missing'}.`);
   if (!data.state || typeof data.state !== 'object') throw new Error('Scenario state is missing.');
   if (!Array.isArray(data.state.accounts) || !Array.isArray(data.state.blocks)) throw new Error('Scenario accounts or cash flows are invalid.');
   return {

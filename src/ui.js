@@ -15,6 +15,7 @@ import { loadMeScenario } from './meScenario.js';
 import { createMarketEvent } from './marketEvents.js';
 import { buildTrackPrompt, buildTrackEditPrompt, validateTrackCreation, validateTrackEdit, requestDeepSeek } from './deepseek.js';
 import { renderMarkdown } from './markdown.js';
+import { distributionHistogram, distributionMean, distributionRange } from './distributions.js';
 
 function todayMonth() {
   const d = new Date();
@@ -22,6 +23,105 @@ function todayMonth() {
 }
 
 function pct(v) { return ((v || 0) * 100).toFixed(1); }
+
+function distributionOptions(selected, { cashFlow = false } = {}) {
+  const options = cashFlow
+    ? [['normal', 'Normal'], ['lognormal', 'Lognormal'], ['studentT', 'Student-t'], ['triangular', 'Triangular'], ['uniform', 'Uniform (continuous)'], ['discreteUniform', 'Uniform (chosen values)']]
+    : [['normal', 'Normal'], ['studentT', 'Student-t (fat tails)'], ['lognormal', 'Lognormal']];
+  return options.map(([value, label]) => `<option value="${value}" ${selected === value ? 'selected' : ''}>${label}</option>`).join('');
+}
+
+function distributionForFamily(spec, family, fallbackScale = 0) {
+  const scale = Math.max(0, Number(spec?.scale ?? fallbackScale) || 0);
+  if (family === 'uniform') return { family, low: spec?.family === family ? spec.low : -scale, high: spec?.family === family ? spec.high : scale };
+  if (family === 'discreteUniform') return { family, values: spec?.family === family && Array.isArray(spec.values) ? spec.values : [-scale, 0, scale] };
+  return { ...spec, family, scale, degreesOfFreedom: Number(spec?.degreesOfFreedom) || 7 };
+}
+
+function distributionParameterMarkup(spec, prefix, disabled = false) {
+  const disabledAttribute = disabled ? 'disabled' : '';
+  if (spec?.family === 'uniform') {
+    return `<div class="distribution-parameters">
+      <label>Minimum change % <input id="${prefix}UniformLow" type="number" step="0.1" value="${pct(spec.low)}" ${disabledAttribute}/></label>
+      <label>Maximum change % <input id="${prefix}UniformHigh" type="number" step="0.1" value="${pct(spec.high)}" ${disabledAttribute}/></label>
+      <small>Every value in this interval is equally likely.</small>
+    </div>`;
+  }
+  if (spec?.family === 'discreteUniform') {
+    const values = (Array.isArray(spec.values) && spec.values.length ? spec.values : [0]).map(value => Number((value * 100).toFixed(4))).join(', ');
+    return `<div class="distribution-parameters">
+      <label>Possible changes % <input id="${prefix}DiscreteValues" type="text" value="${escapeHtml(values)}" placeholder="-20, 0, 10, 25" ${disabledAttribute}/></label>
+      <small>Comma-separated outcomes; each is equally likely.</small>
+    </div>`;
+  }
+  return '';
+}
+
+function wireDistributionParameters(prefix, spec, onChange, disabled = false) {
+  if (disabled) return;
+  const low = document.getElementById(`${prefix}UniformLow`);
+  const high = document.getElementById(`${prefix}UniformHigh`);
+  if (low && high) {
+    const update = () => onChange({ ...spec, family: 'uniform', low: (parseFloat(low.value) || 0) / 100, high: (parseFloat(high.value) || 0) / 100 });
+    low.addEventListener('change', update);
+    high.addEventListener('change', update);
+  }
+  const values = document.getElementById(`${prefix}DiscreteValues`);
+  values?.addEventListener('change', () => {
+    const parsed = values.value.split(',').map(value => Number(value.trim()) / 100).filter(Number.isFinite);
+    onChange({ ...spec, family: 'discreteUniform', values: parsed.length ? parsed : [0] });
+  });
+}
+
+function distributionPreviewMarkup(spec, amount = 0, id = '') {
+  const histogram = distributionHistogram(spec);
+  const width = 300;
+  const height = 70;
+  const chartTop = 7;
+  const chartBottom = 54;
+  const binWidth = width / histogram.bins.length;
+  const bars = histogram.bins.map((density, index) => {
+    const barHeight = density * (chartBottom - chartTop);
+    return `<rect x="${(index * binWidth).toFixed(2)}" y="${(chartBottom - barHeight).toFixed(2)}" width="${Math.max(1, binWidth - 1).toFixed(2)}" height="${barHeight.toFixed(2)}"/>`;
+  }).join('');
+  const expectedX = Math.min(width, Math.max(0, histogram.expectedPosition * width));
+  const annualAmount = Math.abs(Number(amount) || 0);
+  const formatOutcome = relative => annualAmount
+    ? formatCompactMoney(annualAmount * Math.max(0, 1 + relative))
+    : `${relative >= 0 ? '+' : '−'}${Math.abs(relative * 100).toFixed(0)}%`;
+  return `<figure class="distribution-preview" ${id ? `id="${id}"` : ''}>
+    <figcaption><strong>Probability distribution</strong><span>Illustrative range · outer 1% trimmed</span></figcaption>
+    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="Probability distribution from ${formatOutcome(histogram.min)} to ${formatOutcome(histogram.max)}">
+      <g class="distribution-preview-bars">${bars}</g>
+      <line class="distribution-preview-expected" x1="${expectedX.toFixed(2)}" x2="${expectedX.toFixed(2)}" y1="4" y2="58"/>
+      <line class="distribution-preview-axis" x1="0" x2="${width}" y1="${chartBottom}" y2="${chartBottom}"/>
+    </svg>
+    <div class="distribution-preview-labels"><span>${formatOutcome(histogram.min)}</span><b>Baseline ${annualAmount ? formatCompactMoney(annualAmount) : '0%'}</b><span>${formatOutcome(histogram.max)}</span></div>
+  </figure>`;
+}
+
+function growthPreviewMarkup(rate, spec, id = '') {
+  const histogram = distributionHistogram(spec);
+  const width = 300;
+  const chartTop = 7;
+  const chartBottom = 54;
+  const binWidth = width / histogram.bins.length;
+  const bars = histogram.bins.map((density, index) => {
+    const barHeight = density * (chartBottom - chartTop);
+    return `<rect x="${(index * binWidth).toFixed(2)}" y="${(chartBottom - barHeight).toFixed(2)}" width="${Math.max(1, binWidth - 1).toFixed(2)}" height="${barHeight.toFixed(2)}"/>`;
+  }).join('');
+  const baselineX = Math.min(width, Math.max(0, histogram.expectedPosition * width));
+  const formatRate = value => `${value >= 0 ? '+' : '−'}${Math.abs(value * 100).toFixed(1)}%`;
+  return `<figure class="distribution-preview growth-distribution-preview" ${id ? `id="${id}"` : ''}>
+    <figcaption><strong>Annual increase error bars</strong><span>One draw per year · added before inflation</span></figcaption>
+    <svg viewBox="0 0 ${width} 70" preserveAspectRatio="none" role="img" aria-label="Annual increase distribution from ${formatRate(rate + histogram.min)} to ${formatRate(rate + histogram.max)}">
+      <g class="distribution-preview-bars">${bars}</g>
+      <line class="distribution-preview-expected" x1="${baselineX.toFixed(2)}" x2="${baselineX.toFixed(2)}" y1="4" y2="58"/>
+      <line class="distribution-preview-axis" x1="0" x2="${width}" y1="${chartBottom}" y2="${chartBottom}"/>
+    </svg>
+    <div class="distribution-preview-labels"><span>${formatRate(rate + histogram.min)}</span><b>Baseline ${formatRate(rate)}</b><span>${formatRate(rate + histogram.max)}</span></div>
+  </figure>`;
+}
 
 function formatCompactMoney(value) {
   const amount = Number(value) || 0;
@@ -61,7 +161,10 @@ function gatherSettings() {
     city: document.getElementById('citySelect').value,
     numParticles: document.getElementById('numParticles').value,
     useParticleFilter: document.getElementById('useParticleFilter').checked,
+    simulationSeed: document.getElementById('simulationSeed').value,
     inflationRate: document.getElementById('inflationRate').value,
+    inflationVolatility: document.getElementById('inflationVolatility').value,
+    inflationPersistence: document.getElementById('inflationPersistence').value,
     realDollars: document.getElementById('realDollars').checked,
     capGainsEnabled: document.getElementById('capGainsEnabled').checked,
     capGainsRate: document.getElementById('capGainsRate').value,
@@ -75,7 +178,10 @@ function applySettings(settings) {
   if (settings.city != null) document.getElementById('citySelect').value = settings.city;
   if (settings.numParticles != null) document.getElementById('numParticles').value = settings.numParticles;
   if (settings.useParticleFilter != null) document.getElementById('useParticleFilter').checked = settings.useParticleFilter;
+  if (settings.simulationSeed != null) document.getElementById('simulationSeed').value = settings.simulationSeed;
   if (settings.inflationRate != null) document.getElementById('inflationRate').value = settings.inflationRate;
+  if (settings.inflationVolatility != null) document.getElementById('inflationVolatility').value = settings.inflationVolatility;
+  if (settings.inflationPersistence != null) document.getElementById('inflationPersistence').value = settings.inflationPersistence;
   if (settings.realDollars != null) document.getElementById('realDollars').checked = settings.realDollars;
   if (settings.capGainsEnabled != null) document.getElementById('capGainsEnabled').checked = settings.capGainsEnabled;
   if (settings.capGainsRate != null) document.getElementById('capGainsRate').value = settings.capGainsRate;
@@ -99,6 +205,7 @@ export async function initUI(state) {
   const citySelect = document.getElementById('citySelect');
   const defaultAnnualInput = document.getElementById('defaultAnnual');
   const defaultSigmaInput = document.getElementById('defaultSigma');
+  const defaultReturnDistributionInput = document.getElementById('defaultReturnDistribution');
   const scenarioNameInput = document.getElementById('scenarioName');
   const scenarioNotesInput = document.getElementById('scenarioNotes');
   const scenarioNotesPreview = document.getElementById('scenarioNotesPreview');
@@ -111,6 +218,9 @@ export async function initUI(state) {
   const editorDetail = document.getElementById('editorDetail');
   const editorBlockCount = document.getElementById('editorBlockCount');
   const editorState = { blockId: null, clipIndex: 0, timelineScrollLeft: 0 };
+  const trackEditor = document.getElementById('trackEditor');
+  const trackEditorContent = document.getElementById('trackEditorContent');
+  const tracksPageView = document.getElementById('tracksView');
   const trackEditorBody = document.getElementById('trackEditorBody');
   const trackInspector = document.getElementById('trackInspector');
   const trackState = { blockId: null, clipIndex: null, scrollLeft: 0, pixelsPerMonth: 5, pendingCenterRatio: null, scissorsMode: false, smartEditMode: false, activeTab: 'tracks', chartCollapsed: false };
@@ -187,8 +297,10 @@ export async function initUI(state) {
 
   defaultAnnualInput.value = pct(state.globalReturnsSchedule.defaultAnnual);
   defaultSigmaInput.value = pct(state.globalReturnsSchedule.defaultSigma);
+  defaultReturnDistributionInput.value = state.globalReturnsSchedule.defaultDistribution?.family || 'normal';
   defaultAnnualInput.addEventListener('input', e => { state.globalReturnsSchedule.defaultAnnual = parseFloat(e.target.value || 0) / 100; });
-  defaultSigmaInput.addEventListener('input', e => { state.globalReturnsSchedule.defaultSigma = parseFloat(e.target.value || 0) / 100; });
+  defaultSigmaInput.addEventListener('input', e => { state.globalReturnsSchedule.defaultSigma = parseFloat(e.target.value || 0) / 100; state.globalReturnsSchedule.defaultDistribution = { ...(state.globalReturnsSchedule.defaultDistribution || {}), family: state.globalReturnsSchedule.defaultDistribution?.family || 'normal', scale: state.globalReturnsSchedule.defaultSigma }; });
+  defaultReturnDistributionInput.addEventListener('change', e => { state.globalReturnsSchedule.defaultDistribution = { family: e.target.value, scale: state.globalReturnsSchedule.defaultSigma, degreesOfFreedom: 7 }; });
 
   function accountOptions(selectedId, filterFn = () => true) {
     const opts = ['<option value="">— none —</option>'];
@@ -328,6 +440,10 @@ export async function initUI(state) {
     }).join('');
 
     const splitDefault = selected && selected.from !== selected.to ? nextMonthKey(selected.from) : selected?.from;
+    const blockUncertainty = block.uncertainty || { family: 'normal', scale: block.sigma || 0 };
+    const blockUsesScale = !['uniform', 'discreteUniform'].includes(blockUncertainty.family);
+    const growthUncertainty = block.growthUncertainty || { family: 'normal', scale: 0 };
+    const growthUsesScale = !['uniform', 'discreteUniform'].includes(growthUncertainty.family);
     editorDetail.innerHTML = `
       <div class="detail-heading">
         <div><p class="eyebrow">Timeline mode</p><h3>${escapeHtml(block.description)}</h3></div>
@@ -344,9 +460,17 @@ export async function initUI(state) {
         <div class="section-title"><strong>Cash-flow settings</strong><span>These settings apply to every clip on this timeline</span></div>
         <div class="editor-form-grid">
           <label>Cash-flow name <input id="clipFlowName" value="${escapeHtml(block.description)}"/></label>
-          <label>Uncertainty σ % <input id="clipFlowSigma" type="number" step="0.1" value="${pct(block.sigma)}"/></label>
+          <label>Annual uncertainty σ % ${blockUsesScale ? '' : '(not used)'}<input id="clipFlowSigma" type="number" min="0" step="0.1" value="${pct(blockUncertainty.scale ?? block.sigma)}" ${blockUsesScale ? '' : 'disabled'}/></label>
+          <label>Uncertainty shape <select id="clipFlowDistribution">${distributionOptions(blockUncertainty.family, { cashFlow: true })}</select></label>
+          ${distributionParameterMarkup(blockUncertainty, 'clipFlow')}
+          ${distributionPreviewMarkup(blockUncertainty, selected?.annualAmount || block.amount, 'clipFlowDistributionPreview')}
           ${isIncome
-            ? `<label>Target account <select id="clipFlowAccount">${accountOptions(block.targetAccountId, account => account.type !== 'debt')}</select></label><label class="editor-check"><input id="clipFlowPretax" type="checkbox" ${block.preTax ? 'checked' : ''}/> Pre-tax income</label>`
+            ? `<label>Expected annual increase % <input id="clipFlowGrowthRate" type="number" step="0.1" value="${pct(block.annualGrowthRate)}"/></label>
+              <label>Increase uncertainty σ % ${growthUsesScale ? '' : '(not used)'}<input id="clipFlowGrowthSigma" type="number" min="0" step="0.1" value="${pct(growthUncertainty.scale)}" ${growthUsesScale ? '' : 'disabled'}/></label>
+              <label>Increase uncertainty shape <select id="clipFlowGrowthDistribution">${distributionOptions(growthUncertainty.family, { cashFlow: true })}</select></label>
+              ${distributionParameterMarkup(growthUncertainty, 'clipFlowGrowth')}
+              ${growthPreviewMarkup(block.annualGrowthRate || 0, growthUncertainty, 'clipFlowGrowthPreview')}
+              <label>Target account <select id="clipFlowAccount">${accountOptions(block.targetAccountId, account => account.type !== 'debt')}</select></label><label class="editor-check"><input id="clipFlowPretax" type="checkbox" ${block.preTax ? 'checked' : ''}/> Pre-tax income</label>`
             : `<label>Paid from <select id="clipFlowAccount">${accountOptions(block.sourceAccountId, account => account.type !== 'debt')}</select></label><label>Pay down debt <select id="clipFlowDebt">${accountOptions(block.debtAccountId, account => account.type === 'debt')}</select></label>`}
           <label class="editor-check"><input id="clipFlowInflation" type="checkbox" ${block.inflationAdjusted !== false ? 'checked' : ''}/> Escalate with inflation</label>
         </div>
@@ -385,7 +509,15 @@ export async function initUI(state) {
       renderBlockEditor();
     });
     document.getElementById('clipFlowName').addEventListener('change', event => { block.description = event.target.value; renderBlockEditor(); });
-    document.getElementById('clipFlowSigma').addEventListener('change', event => { block.sigma = parseFloat(event.target.value || 0) / 100; });
+    document.getElementById('clipFlowSigma').addEventListener('change', event => { block.sigma = parseFloat(event.target.value || 0) / 100; block.uncertainty = { ...(block.uncertainty || {}), family: block.uncertainty?.family || 'normal', scale: block.sigma }; renderBlockEditor(); });
+    document.getElementById('clipFlowDistribution').addEventListener('change', event => { block.uncertainty = distributionForFamily(blockUncertainty, event.target.value, block.sigma); renderBlockEditor(); });
+    wireDistributionParameters('clipFlow', blockUncertainty, uncertainty => { block.uncertainty = uncertainty; renderBlockEditor(); });
+    if (isIncome) {
+      document.getElementById('clipFlowGrowthRate').addEventListener('change', event => { block.annualGrowthRate = parseFloat(event.target.value || 0) / 100; renderBlockEditor(); });
+      document.getElementById('clipFlowGrowthSigma').addEventListener('change', event => { block.growthUncertainty = { ...growthUncertainty, family: growthUncertainty.family || 'normal', scale: parseFloat(event.target.value || 0) / 100 }; renderBlockEditor(); });
+      document.getElementById('clipFlowGrowthDistribution').addEventListener('change', event => { block.growthUncertainty = distributionForFamily(growthUncertainty, event.target.value, growthUncertainty.scale); renderBlockEditor(); });
+      wireDistributionParameters('clipFlowGrowth', growthUncertainty, uncertainty => { block.growthUncertainty = uncertainty; renderBlockEditor(); });
+    }
     document.getElementById('clipFlowAccount').addEventListener('change', event => { if (isIncome) block.targetAccountId = event.target.value || null; else block.sourceAccountId = event.target.value || null; });
     document.getElementById('clipFlowPretax')?.addEventListener('change', event => { block.preTax = event.target.checked; });
     document.getElementById('clipFlowDebt')?.addEventListener('change', event => { block.debtAccountId = event.target.value || null; });
@@ -404,6 +536,10 @@ export async function initUI(state) {
 
   function renderRegularBlockEditor(block) {
     const isIncome = block.category === 'income';
+    const blockUncertainty = block.uncertainty || { family: 'normal', scale: block.sigma || 0 };
+    const blockUsesScale = !['uniform', 'discreteUniform'].includes(blockUncertainty.family);
+    const growthUncertainty = block.growthUncertainty || { family: 'normal', scale: 0 };
+    const growthUsesScale = !['uniform', 'discreteUniform'].includes(growthUncertainty.family);
     editorDetail.innerHTML = `
       <div class="detail-heading"><div><p class="eyebrow">${isIncome ? 'Income' : 'Expense'}</p><h3>${escapeHtml(block.description)}</h3></div></div>
       <section class="editor-section">
@@ -412,10 +548,18 @@ export async function initUI(state) {
           <label>Name <input id="editBlockName" value="${escapeHtml(block.description)}"/></label>
           <label>Type <select id="editBlockKind"><option value="continuous" ${block.kind === 'continuous' ? 'selected' : ''}>Recurring</option><option value="one-time" ${block.kind === 'one-time' ? 'selected' : ''}>One-time</option></select></label>
           <label>${block.kind === 'one-time' ? 'Amount $' : 'Annual amount $'} <input id="editBlockAmount" type="number" value="${block.amount}" ${block.useCustomSchedule ? 'disabled' : ''}/></label>
-          <label>Uncertainty σ % <input id="editBlockSigma" type="number" step="0.1" value="${pct(block.sigma)}"/></label>
+          <label>${block.kind === 'one-time' ? 'Amount' : 'Annual'} uncertainty σ % ${blockUsesScale ? '' : '(not used)'}<input id="editBlockSigma" type="number" min="0" step="0.1" value="${pct(blockUncertainty.scale ?? block.sigma)}" ${blockUsesScale ? '' : 'disabled'}/></label>
+          <label>Uncertainty shape <select id="editBlockDistribution">${distributionOptions(blockUncertainty.family, { cashFlow: true })}</select></label>
+          ${distributionParameterMarkup(blockUncertainty, 'editBlock')}
+          ${distributionPreviewMarkup(blockUncertainty, block.amount, 'editBlockDistributionPreview')}
           ${block.kind === 'one-time' ? `<label>Month <input id="editBlockStart" type="month" value="${block.startMonth || ''}"/></label>` : ''}
           ${isIncome
-            ? `<label>Target account <select id="editBlockAccount">${accountOptions(block.targetAccountId, account => account.type !== 'debt')}</select></label><label class="editor-check"><input id="editBlockPretax" type="checkbox" ${block.preTax ? 'checked' : ''}/> Pre-tax income</label>`
+            ? `${block.kind === 'continuous' ? `<label>Expected annual increase % <input id="editBlockGrowthRate" type="number" step="0.1" value="${pct(block.annualGrowthRate)}"/></label>
+              <label>Increase uncertainty σ % ${growthUsesScale ? '' : '(not used)'}<input id="editBlockGrowthSigma" type="number" min="0" step="0.1" value="${pct(growthUncertainty.scale)}" ${growthUsesScale ? '' : 'disabled'}/></label>
+              <label>Increase uncertainty shape <select id="editBlockGrowthDistribution">${distributionOptions(growthUncertainty.family, { cashFlow: true })}</select></label>
+              ${distributionParameterMarkup(growthUncertainty, 'editBlockGrowth')}
+              ${growthPreviewMarkup(block.annualGrowthRate || 0, growthUncertainty, 'editBlockGrowthPreview')}` : ''}
+              <label>Target account <select id="editBlockAccount">${accountOptions(block.targetAccountId, account => account.type !== 'debt')}</select></label><label class="editor-check"><input id="editBlockPretax" type="checkbox" ${block.preTax ? 'checked' : ''}/> Pre-tax income</label>`
             : `<label>Paid from <select id="editBlockAccount">${accountOptions(block.sourceAccountId, account => account.type !== 'debt')}</select></label><label>Pay down debt <select id="editBlockDebt">${accountOptions(block.debtAccountId, account => account.type === 'debt')}</select></label>`}
           <label class="editor-check"><input id="editBlockInflation" type="checkbox" ${block.inflationAdjusted !== false ? 'checked' : ''}/> Escalate with inflation</label>
         </div>
@@ -424,8 +568,16 @@ export async function initUI(state) {
 
     document.getElementById('editBlockName').addEventListener('change', event => { block.description = event.target.value; renderBlockEditor(); });
     document.getElementById('editBlockKind').addEventListener('change', event => { block.kind = event.target.value; if (block.kind === 'one-time') block.useCustomSchedule = false; renderBlockEditor(); });
-    document.getElementById('editBlockAmount').addEventListener('change', event => { block.amount = parseFloat(event.target.value || 0); renderEditorList(); });
-    document.getElementById('editBlockSigma').addEventListener('change', event => { block.sigma = parseFloat(event.target.value || 0) / 100; });
+    document.getElementById('editBlockAmount').addEventListener('change', event => { block.amount = parseFloat(event.target.value || 0); renderBlockEditor(); });
+    document.getElementById('editBlockSigma').addEventListener('change', event => { block.sigma = parseFloat(event.target.value || 0) / 100; block.uncertainty = { ...(block.uncertainty || {}), family: block.uncertainty?.family || 'normal', scale: block.sigma }; renderBlockEditor(); });
+    document.getElementById('editBlockDistribution').addEventListener('change', event => { block.uncertainty = distributionForFamily(blockUncertainty, event.target.value, block.sigma); renderBlockEditor(); });
+    wireDistributionParameters('editBlock', blockUncertainty, uncertainty => { block.uncertainty = uncertainty; renderBlockEditor(); });
+    if (isIncome && block.kind === 'continuous') {
+      document.getElementById('editBlockGrowthRate').addEventListener('change', event => { block.annualGrowthRate = parseFloat(event.target.value || 0) / 100; renderBlockEditor(); });
+      document.getElementById('editBlockGrowthSigma').addEventListener('change', event => { block.growthUncertainty = { ...growthUncertainty, family: growthUncertainty.family || 'normal', scale: parseFloat(event.target.value || 0) / 100 }; renderBlockEditor(); });
+      document.getElementById('editBlockGrowthDistribution').addEventListener('change', event => { block.growthUncertainty = distributionForFamily(growthUncertainty, event.target.value, growthUncertainty.scale); renderBlockEditor(); });
+      wireDistributionParameters('editBlockGrowth', growthUncertainty, uncertainty => { block.growthUncertainty = uncertainty; renderBlockEditor(); });
+    }
     document.getElementById('editBlockStart')?.addEventListener('change', event => { block.startMonth = event.target.value; });
     document.getElementById('editBlockAccount').addEventListener('change', event => { if (isIncome) block.targetAccountId = event.target.value || null; else block.sourceAccountId = event.target.value || null; });
     document.getElementById('editBlockPretax')?.addEventListener('change', event => { block.preTax = event.target.checked; });
@@ -487,12 +639,51 @@ export async function initUI(state) {
     const source = block.useCustomSchedule
       ? block.amountSchedule.entries
       : [{ from: block.startMonth || window.from, to: block.endMonth || window.to, name: block.description, annualAmount: block.amount }];
-    return buildScheduleClips(source, window.from, window.to);
+    return buildScheduleClips(source, window.from, window.to).map(clip => {
+      Object.defineProperty(clip, 'effectiveUncertainty', {
+        value: clip.uncertainty || block.uncertainty || { family: 'normal', scale: block.sigma || 0 },
+        enumerable: false,
+      });
+      return clip;
+    });
   }
 
   // Cash flows into taxable/retirement/roth accounts are transfers into investments,
   // not real spending or take-home income, so the cash-flow chart excludes them.
   const INVESTMENT_ACCOUNT_TYPES = new Set(['taxable', 'retirement', 'roth']);
+
+  function averageAnnualGrowthRate(block) {
+    if (block.category !== 'income') return 0;
+    return (Number(block.annualGrowthRate) || 0) + distributionMean(block.growthUncertainty);
+  }
+
+  function projectedClipAmount(block, clip, absoluteMonthIndex) {
+    const base = Math.abs(Number(clip.annualAmount) || 0);
+    const amountMean = distributionMean(clip.uncertainty || clip.effectiveUncertainty || block.uncertainty);
+    const averageBase = base * Math.max(0, 1 + amountMean);
+    if (block.category !== 'income' || base === 0) return averageBase;
+    const elapsedYears = Math.max(0, Math.floor((absoluteMonthIndex - keyToIdx(clip.from)) / 12));
+    return averageBase * Math.pow(Math.max(0, 1 + averageAnnualGrowthRate(block)), elapsedYears);
+  }
+
+  function projectedClipRange(block, clip, absoluteMonthIndex) {
+    const base = Math.abs(Number(clip.annualAmount) || 0);
+    const amountRange = distributionRange(clip.uncertainty || clip.effectiveUncertainty || block.uncertainty);
+    const elapsedYears = block.category === 'income' ? Math.max(0, Math.floor((absoluteMonthIndex - keyToIdx(clip.from)) / 12)) : 0;
+    const growthRange = distributionRange(block.growthUncertainty);
+    const growthRate = block.category === 'income' ? Number(block.annualGrowthRate) || 0 : 0;
+    const low = base * Math.max(0, 1 + amountRange.min) * Math.pow(Math.max(0, 1 + growthRate + growthRange.min), elapsedYears);
+    const high = base * Math.max(0, 1 + amountRange.max) * Math.pow(Math.max(0, 1 + growthRate + growthRange.max), elapsedYears);
+    return { low: Math.min(low, high), high: Math.max(low, high) };
+  }
+
+  function averageClipAmount(block, clip) {
+    const start = keyToIdx(clip.from);
+    const end = keyToIdx(clip.to);
+    let total = 0;
+    for (let month = start; month <= end; month++) total += projectedClipAmount(block, clip, month);
+    return total / Math.max(1, end - start + 1);
+  }
 
   function cashFlowSeries(window, totalMonths) {
     const income = new Array(totalMonths).fill(0);
@@ -519,8 +710,9 @@ export async function initUI(state) {
       for (const clip of clipsForTrack(block, window)) {
         const startIdx = Math.max(0, keyToIdx(clip.from) - windowStartIdx);
         const endIdx = Math.min(totalMonths - 1, keyToIdx(clip.to) - windowStartIdx);
-        const perMonth = Math.abs((Number(clip.annualAmount) || 0) / 12);
-        for (let i = startIdx; i <= endIdx; i++) series[i] += perMonth;
+        for (let i = startIdx; i <= endIdx; i++) {
+          series[i] += projectedClipAmount(block, clip, windowStartIdx + i) / 12;
+        }
       }
     }
     return { income, expense };
@@ -645,6 +837,8 @@ export async function initUI(state) {
         targetAccountId: result.category === 'income' ? accountId : null,
         sourceAccountId: result.category === 'expense' ? accountId : null,
         sigma: result.sigma,
+        annualGrowthRate: result.annualGrowthRate,
+        growthUncertainty: result.growthUncertainty,
         inflationAdjusted: result.inflationAdjusted,
         useCustomSchedule: true,
         amountSchedule: new AmountSchedule(clips),
@@ -677,21 +871,41 @@ export async function initUI(state) {
     renderTrackEditor();
   }
 
-  function trackCostLine(clips, window, totalMonths, timelineWidth, tone) {
-    const maxAmount = Math.max(1, ...clips.map(clip => Math.abs(Number(clip.annualAmount) || 0)));
-    const points = [];
+  function trackCostLine(block, clips, window, totalMonths, timelineWidth, tone) {
+    const windowStart = keyToIdx(window.from);
+    const projected = new Array(totalMonths).fill(0);
+    const projectedLow = new Array(totalMonths).fill(0);
+    const projectedHigh = new Array(totalMonths).fill(0);
     for (const clip of clips) {
-      const start = Math.max(0, keyToIdx(clip.from) - keyToIdx(window.from));
-      const end = Math.min(totalMonths, keyToIdx(clip.to) - keyToIdx(window.from) + 1);
-      const x1 = start / totalMonths * timelineWidth;
-      const x2 = end / totalMonths * timelineWidth;
-      const amount = Math.abs(Number(clip.annualAmount) || 0);
+      const start = Math.max(0, keyToIdx(clip.from) - windowStart);
+      const end = Math.min(totalMonths - 1, keyToIdx(clip.to) - windowStart);
+      for (let month = start; month <= end; month++) {
+        projected[month] = projectedClipAmount(block, clip, windowStart + month);
+        const range = projectedClipRange(block, clip, windowStart + month);
+        projectedLow[month] = range.low;
+        projectedHigh[month] = range.high;
+      }
+    }
+    const maxAmount = Math.max(1, ...projectedHigh, ...projected);
+    const points = [];
+    const upperPoints = [];
+    const lowerPoints = [];
+    for (let month = 0; month < totalMonths; month++) {
+      const x1 = month / totalMonths * timelineWidth;
+      const x2 = (month + 1) / totalMonths * timelineWidth;
+      const amount = projected[month];
       const y = 49 - amount / maxAmount * 39;
+      const highY = 49 - projectedHigh[month] / maxAmount * 39;
+      const lowY = 49 - projectedLow[month] / maxAmount * 39;
       if (points.length) points.push(`${x1},${points.at(-1).split(',')[1]}`, `${x1},${y}`);
       else points.push(`${x1},${y}`);
       points.push(`${x2},${y}`);
+      upperPoints.push(`${x1},${highY}`, `${x2},${highY}`);
+      lowerPoints.push(`${x1},${lowY}`, `${x2},${lowY}`);
     }
-    return `<svg class="track-cost-line ${tone}" viewBox="0 0 ${timelineWidth} 54" preserveAspectRatio="none" aria-hidden="true" data-peak="${escapeHtml(formatCompactMoney(maxAmount))}"><polyline points="${points.join(' ')}"/><line x1="0" y1="49" x2="${timelineWidth}" y2="49"/></svg>`;
+    const hasRange = projected.some((value, index) => Math.abs(projectedLow[index] - value) > 1e-6 || Math.abs(projectedHigh[index] - value) > 1e-6);
+    const band = hasRange ? `<polygon class="track-average-band" points="${[...upperPoints, ...lowerPoints.reverse()].join(' ')}"/>` : '';
+    return `<svg class="track-cost-line ${tone}" viewBox="0 0 ${timelineWidth} 54" preserveAspectRatio="none" aria-label="Average projected ${tone} cash flow with error bars, peaking at ${escapeHtml(formatCompactMoney(maxAmount))} per year" data-peak="${escapeHtml(formatCompactMoney(maxAmount))}">${band}<polyline points="${points.join(' ')}"/><line x1="0" y1="49" x2="${timelineWidth}" y2="49"/></svg>`;
   }
 
   function trackYearTicks(window, totalMonths) {
@@ -729,12 +943,15 @@ export async function initUI(state) {
           <button id="trackOpenDetail" class="secondary" type="button">Open loan editor</button>
         </div>`;
       document.getElementById('trackOpenDetail').addEventListener('click', () => {
+        if (trackEditor.open) trackEditor.close();
         openBlockEditor(block.id);
       });
       return;
     }
     const canSplice = clip.from !== clip.to;
     const splitDefault = canSplice ? nextMonthKey(clip.from) : clip.from;
+    const clipUncertainty = clip.uncertainty || clip.effectiveUncertainty || block.uncertainty || { family: 'normal', scale: block.sigma || 0 };
+    const clipUsesScale = !['uniform', 'discreteUniform'].includes(clipUncertainty.family);
     trackInspector.innerHTML = `
       <div class="track-inspector-title">
         <div><span class="track-kind ${block.category}">${block.category}</span><strong>${escapeHtml(block.description)}</strong></div>
@@ -743,6 +960,11 @@ export async function initUI(state) {
       <div class="track-inspector-fields">
         <label>Condition name <input id="trackClipName" value="${escapeHtml(clip.name)}"/></label>
         <label>Annual amount $ <input id="trackClipAmount" type="number" value="${clip.annualAmount}"/></label>
+        <label class="editor-check"><input id="trackClipUncertaintyOverride" type="checkbox" ${clip.uncertainty ? 'checked' : ''}/> Override track uncertainty</label>
+        <label>Annual uncertainty σ % ${clipUsesScale ? '' : '(not used)'}<input id="trackClipUncertainty" type="number" min="0" step="0.1" value="${pct(clipUncertainty.scale)}" ${clip.uncertainty && clipUsesScale ? '' : 'disabled'}/></label>
+        <label>Uncertainty shape <select id="trackClipDistribution" ${clip.uncertainty ? '' : 'disabled'}>${distributionOptions(clipUncertainty.family, { cashFlow: true })}</select></label>
+        ${distributionParameterMarkup(clipUncertainty, 'trackClip', !clip.uncertainty)}
+        ${distributionPreviewMarkup(clipUncertainty, clip.annualAmount, 'trackClipDistributionPreview')}
         <label>Splice at <input id="trackSpliceMonth" type="month" min="${nextMonthKey(clip.from)}" max="${clip.to}" value="${splitDefault}" ${canSplice ? '' : 'disabled'}/></label>
         <button id="trackSplice" type="button" ${canSplice ? '' : 'disabled'}>✂ Splice</button>
         <button id="trackPause" class="secondary" type="button">Pause ($0)</button>
@@ -762,6 +984,20 @@ export async function initUI(state) {
       clip.annualAmount = parseFloat(event.target.value || 0);
       commitClips();
     });
+    document.getElementById('trackClipUncertaintyOverride').addEventListener('change', event => {
+      if (event.target.checked) clip.uncertainty = { ...clipUncertainty };
+      else delete clip.uncertainty;
+      commitClips();
+    });
+    document.getElementById('trackClipUncertainty').addEventListener('change', event => {
+      clip.uncertainty = { ...(clip.uncertainty || clipUncertainty), scale: parseFloat(event.target.value || 0) / 100 };
+      commitClips();
+    });
+    document.getElementById('trackClipDistribution').addEventListener('change', event => {
+      clip.uncertainty = distributionForFamily(clip.uncertainty || clipUncertainty, event.target.value, block.sigma);
+      commitClips();
+    });
+    wireDistributionParameters('trackClip', clipUncertainty, uncertainty => { clip.uncertainty = uncertainty; commitClips(); }, !clip.uncertainty);
     document.getElementById('trackSplice').addEventListener('click', () => {
       if (!spliceScheduleClip(clips, trackState.clipIndex, document.getElementById('trackSpliceMonth').value)) return;
       block.amountSchedule = new AmountSchedule(clips);
@@ -775,6 +1011,7 @@ export async function initUI(state) {
       commitClips();
     });
     document.getElementById('trackOpenDetail').addEventListener('click', () => {
+      if (trackEditor.open) trackEditor.close();
       openBlockEditor(block.id);
     });
   }
@@ -810,7 +1047,7 @@ export async function initUI(state) {
       <div class="track-labels">
         <div class="track-corner">Cash flow</div>
         ${blocks.map(block => `<div class="track-label-row">
-          <button class="track-label" data-track-detail="${escapeHtml(block.id)}" type="button"><span class="track-kind ${block.kind === 'loan' ? 'loan' : block.category}">${block.kind === 'loan' ? 'purchase' : block.category}</span><strong>${escapeHtml(block.description)}</strong><small>${block.kind === 'loan' ? `${formatCompactMoney(loanDownPaymentAmount(block))} down · ${formatCompactMoney(loanMonthlyPayment(block))}/mo` : block.useCustomSchedule ? 'clip schedule' : 'simple recurring'}</small></button>
+          <button class="track-label" data-track-detail="${escapeHtml(block.id)}" type="button"><span class="track-kind ${block.kind === 'loan' ? 'loan' : block.category}">${block.kind === 'loan' ? 'purchase' : block.category}</span><strong>${escapeHtml(block.description)}</strong><small>${block.kind === 'loan' ? `${formatCompactMoney(loanDownPaymentAmount(block))} down · ${formatCompactMoney(loanMonthlyPayment(block))}/mo` : `${block.useCustomSchedule ? 'clip schedule' : 'simple recurring'}${block.category === 'income' && block.annualGrowthRate ? ` · ${pct(block.annualGrowthRate)}% raise/yr` : ''}`}</small></button>
           <button class="track-label-remove" data-track-remove="${escapeHtml(block.id)}" type="button" title="Delete this track" aria-label="Delete ${escapeHtml(block.description)} track"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6 1.5h4a.5.5 0 0 1 .5.5v1h3a.5.5 0 0 1 0 1h-.55l-.7 9.11a1.5 1.5 0 0 1-1.5 1.39H5.25a1.5 1.5 0 0 1-1.5-1.39L3.05 4H2.5a.5.5 0 0 1 0-1h3V2a.5.5 0 0 1 .5-.5Zm-.5 2h5V2.5h-5V3.5Zm-1.44 1 .69 8.96a.5.5 0 0 0 .5.46h5.5a.5.5 0 0 0 .5-.46L11.94 4.5H4.06ZM6.5 6a.5.5 0 0 1 .5.5v5a.5.5 0 0 1-1 0v-5a.5.5 0 0 1 .5-.5Zm3 0a.5.5 0 0 1 .5.5v5a.5.5 0 0 1-1 0v-5a.5.5 0 0 1 .5-.5Z" fill="currentColor"/></svg></button>
         </div>`).join('')}
       </div>
@@ -821,14 +1058,18 @@ export async function initUI(state) {
           ${blocks.map(block => {
             const clips = clipsForTrack(block, window);
             const tone = block.kind === 'loan' ? 'loan' : block.category;
-            const costLine = trackCostLine(clips, window, totalMonths, timelineWidth, tone);
+            const costLine = trackCostLine(block, clips, window, totalMonths, timelineWidth, tone);
             return `<div class="track-row ${block.kind === 'loan' ? 'loan' : ''}" data-track-id="${escapeHtml(block.id)}">${clips.map((clip, index) => {
               const months = keyToIdx(clip.to) - keyToIdx(clip.from) + 1;
               const width = months / totalMonths * 100;
               const selected = block.id === trackState.blockId && index === trackState.clipIndex;
               const paused = clip.annualAmount === 0;
               const unit = block.kind === 'loan' && clip.name.includes('Purchase') ? ' purchase month' : '/yr';
-              return `<button class="track-clip ${block.kind === 'loan' ? 'loan' : block.category} ${paused ? 'paused' : ''} ${selected ? 'selected' : ''}" style="width:${width}%" data-track-block="${escapeHtml(block.id)}" data-track-clip="${index}" type="button" title="${escapeHtml(clip.name)} · ${clip.from} → ${clip.to} · ${formatCompactMoney(clip.annualAmount)}${unit}"><strong>${escapeHtml(clip.name)}</strong><small>${paused ? '$0' : `${formatCompactMoney(clip.annualAmount)}${unit}`}</small></button>`;
+              const averageAmount = averageClipAmount(block, clip);
+              const amountLabel = block.category === 'income' && averageAnnualGrowthRate(block) !== 0
+                ? `${formatCompactMoney(clip.annualAmount)} start · avg ${formatCompactMoney(averageAmount)}/yr`
+                : `${formatCompactMoney(clip.annualAmount)}${unit}`;
+              return `<button class="track-clip ${block.kind === 'loan' ? 'loan' : block.category} ${paused ? 'paused' : ''} ${selected ? 'selected' : ''}" style="width:${width}%" data-track-block="${escapeHtml(block.id)}" data-track-clip="${index}" type="button" title="${escapeHtml(clip.name)} · ${clip.from} → ${clip.to} · ${amountLabel}"><strong>${escapeHtml(clip.name)}</strong><small>${paused ? '$0' : amountLabel}</small></button>`;
             }).join('')}${costLine}</div>`;
           }).join('')}
           <div class="track-hover-guide" hidden><span></span><time></time></div>
@@ -923,6 +1164,7 @@ export async function initUI(state) {
     }, true);
     trackEditorBody.querySelectorAll('[data-track-detail]').forEach(button => {
       button.addEventListener('click', () => {
+        if (trackEditor.open) trackEditor.close();
         openBlockEditor(button.dataset.trackDetail);
       });
     });
@@ -935,7 +1177,19 @@ export async function initUI(state) {
     renderTrackInspector();
   }
 
-  function activateTracksView() {
+  // Clicking blank space in the tracks view (not a clip, label, or add-row
+  // control) deselects the current clip and closes the inspector panel.
+  // Bound once since trackEditorBody itself persists across re-renders
+  // (only its innerHTML is replaced).
+  trackEditorBody.addEventListener('click', event => {
+    if (trackState.blockId == null || trackState.scissorsMode || trackState.smartEditMode) return;
+    if (event.target.closest('[data-track-block], [data-track-detail], [data-track-remove], .track-add-row')) return;
+    trackState.blockId = null;
+    trackState.clipIndex = null;
+    renderTrackEditor();
+  });
+
+  function resetTrackViewState() {
     trackState.blockId = null;
     trackState.clipIndex = null;
     trackState.scrollLeft = 0;
@@ -944,13 +1198,26 @@ export async function initUI(state) {
     trackState.scissorsMode = false;
     trackState.smartEditMode = false;
     trackState.chartCollapsed = false;
-    setTrackTab('tracks');
+  }
+  function moveTrackEditorContentTo(container) {
+    if (trackEditorContent.parentElement !== container) container.appendChild(trackEditorContent);
+  }
+  function activateTracksView() {
+    resetTrackViewState();
+    moveTrackEditorContentTo(tracksPageView.querySelector('.track-editor-shell'));
+    setTrackTab('cashflow');
     renderTrackEditor();
   }
   document.getElementById('openTrackEditor').addEventListener('click', () => {
-    activateTracksView();
-    document.dispatchEvent(new CustomEvent('finSim:showTracksView'));
+    resetTrackViewState();
+    moveTrackEditorContentTo(trackEditor.querySelector('.track-editor-shell'));
+    setTrackTab('tracks');
+    renderTrackEditor();
+    trackEditor.showModal();
   });
+  document.getElementById('closeTrackEditor').addEventListener('click', () => trackEditor.close());
+  trackEditor.addEventListener('click', event => { if (event.target === trackEditor) trackEditor.close(); });
+  trackEditor.addEventListener('close', () => renderBlocks());
   function setTrackTab(tab) {
     trackState.activeTab = tab;
     const isCashflow = tab === 'cashflow';
@@ -960,17 +1227,21 @@ export async function initUI(state) {
     tracksTabButton.setAttribute('aria-selected', String(!isCashflow));
     cashflowTabButton.classList.toggle('active', isCashflow);
     cashflowTabButton.setAttribute('aria-selected', String(isCashflow));
-    document.getElementById('trackChartFullscreen').classList.toggle('view-hidden', !isCashflow);
+    document.getElementById('trackChartToggle').classList.toggle('view-hidden', !isCashflow);
     document.getElementById('trackCashflowChart').classList.toggle('view-hidden', !isCashflow || trackState.chartCollapsed);
   }
   document.getElementById('trackTabTracks').addEventListener('click', () => setTrackTab('tracks'));
   document.getElementById('trackTabCashflow').addEventListener('click', () => setTrackTab('cashflow'));
-  document.getElementById('trackChartFullscreen').addEventListener('click', () => {
+  const EYE_OPEN_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M1 8s2.6-5 7-5 7 5 7 5-2.6 5-7 5-7-5-7-5Z" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="8" r="2.1" fill="currentColor"/></svg>';
+  const EYE_CLOSED_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M1 8s2.6-5 7-5 7 5 7 5-2.6 5-7 5-7-5-7-5Z" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="8" r="2.1" fill="currentColor"/><line x1="1.5" y1="1.5" x2="14.5" y2="14.5" stroke="currentColor" stroke-width="1.3"/></svg>';
+  document.getElementById('trackChartToggle').addEventListener('click', () => {
     trackState.chartCollapsed = !trackState.chartCollapsed;
-    const button = document.getElementById('trackChartFullscreen');
+    const button = document.getElementById('trackChartToggle');
     button.setAttribute('aria-pressed', String(trackState.chartCollapsed));
-    button.title = trackState.chartCollapsed ? 'Show cash-flow chart' : 'Maximize tracks view';
-    button.innerHTML = trackState.chartCollapsed ? '<span aria-hidden="true">⤡</span> Show chart' : '<span aria-hidden="true">⤡</span> Maximize tracks';
+    const label = trackState.chartCollapsed ? 'Show cash-flow chart' : 'Hide cash-flow chart';
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    button.innerHTML = `<span class="track-chart-toggle-icon" aria-hidden="true">${trackState.chartCollapsed ? EYE_CLOSED_ICON : EYE_OPEN_ICON}</span> ${trackState.chartCollapsed ? 'Show chart' : 'Hide chart'}`;
     document.getElementById('trackCashflowChart').classList.toggle('view-hidden', trackState.activeTab !== 'cashflow' || trackState.chartCollapsed);
   });
   function changeTrackZoom(nextPixelsPerMonth) {
@@ -1032,13 +1303,15 @@ export async function initUI(state) {
         <div class="row">
           <label>Annual % <input type="number" step="0.1" class="seg-annual" value="${pct(seg.annual)}"/></label>
           <label>σ % <input type="number" step="0.1" class="seg-sigma" value="${pct(seg.sigma)}"/></label>
+          <label>Distribution <select class="seg-distribution">${distributionOptions(seg.distribution?.family || 'normal')}</select></label>
           <button class="remove seg-remove" type="button">remove</button>
         </div>`;
       container.appendChild(row);
       row.querySelector('.seg-from').addEventListener('input', e => { seg.from = e.target.value; });
       row.querySelector('.seg-to').addEventListener('input', e => { seg.to = e.target.value; });
       row.querySelector('.seg-annual').addEventListener('input', e => { seg.annual = parseFloat(e.target.value || 0) / 100; });
-      row.querySelector('.seg-sigma').addEventListener('input', e => { seg.sigma = parseFloat(e.target.value || 0) / 100; });
+      row.querySelector('.seg-sigma').addEventListener('input', e => { seg.sigma = parseFloat(e.target.value || 0) / 100; seg.distribution = { ...(seg.distribution || {}), family: seg.distribution?.family || 'normal', scale: seg.sigma }; });
+      row.querySelector('.seg-distribution').addEventListener('change', e => { seg.distribution = { ...(seg.distribution || {}), family: e.target.value, scale: seg.sigma ?? state.globalReturnsSchedule.defaultSigma, degreesOfFreedom: 7 }; });
       row.querySelector('.seg-remove').addEventListener('click', () => { entries.splice(idx, 1); onChange(); });
     });
   }
@@ -1068,10 +1341,12 @@ export async function initUI(state) {
         <div class="event-grid">
           <label>Event name <input class="event-name" value="${escapeHtml(event.name)}"/></label>
           <label>Probability % <input class="event-probability" type="number" min="0" max="100" step="0.1" value="${pct(event.probability)}"/></label>
+          <label>Probability means <select class="event-probability-mode"><option value="window" ${event.probabilityMode !== 'annual' ? 'selected' : ''}>Total chance in window</option><option value="annual" ${event.probabilityMode === 'annual' ? 'selected' : ''}>Chance each year</option></select></label>
           <label>Can begin within next (months) <input class="event-window" type="number" min="1" step="1" value="${event.triggerWindowMonths}"/></label>
           <label>Duration (months) <input class="event-duration" type="number" min="1" step="1" value="${event.durationMonths}"/></label>
           <label>Annual return during event % <input class="event-return" type="number" step="0.1" value="${pct(event.annualReturn)}"/></label>
           <label>Volatility σ % <input class="event-sigma" type="number" min="0" step="0.1" value="${pct(event.sigma)}"/></label>
+          <label>Return distribution <select class="event-distribution">${distributionOptions(event.distribution?.family || 'normal')}</select></label>
           <label>Applies to <select class="event-scope"><option value="investments" ${event.scope === 'investments' ? 'selected' : ''}>Investment accounts</option><option value="all" ${event.scope === 'all' ? 'selected' : ''}>All non-debt accounts</option></select></label>
         </div>`;
       marketEventsDiv.appendChild(card);
@@ -1081,10 +1356,12 @@ export async function initUI(state) {
       };
       card.querySelector('.event-name').addEventListener('input', e => { event.name = e.target.value; updateSummary(); });
       card.querySelector('.event-probability').addEventListener('input', e => { event.probability = Math.min(1, Math.max(0, parseFloat(e.target.value || 0) / 100)); updateSummary(); });
+      card.querySelector('.event-probability-mode').addEventListener('change', e => { event.probabilityMode = e.target.value; updateSummary(); });
       card.querySelector('.event-window').addEventListener('input', e => { event.triggerWindowMonths = Math.max(1, Math.round(parseFloat(e.target.value || 1))); updateSummary(); });
       card.querySelector('.event-duration').addEventListener('input', e => { event.durationMonths = Math.max(1, Math.round(parseFloat(e.target.value || 1))); updateSummary(); });
       card.querySelector('.event-return').addEventListener('input', e => { event.annualReturn = parseFloat(e.target.value || 0) / 100; });
-      card.querySelector('.event-sigma').addEventListener('input', e => { event.sigma = Math.max(0, parseFloat(e.target.value || 0) / 100); });
+      card.querySelector('.event-sigma').addEventListener('input', e => { event.sigma = Math.max(0, parseFloat(e.target.value || 0) / 100); event.distribution = { ...(event.distribution || {}), family: event.distribution?.family || 'normal', scale: event.sigma }; });
+      card.querySelector('.event-distribution').addEventListener('change', e => { event.distribution = { ...(event.distribution || {}), family: e.target.value, scale: event.sigma, degreesOfFreedom: 5 }; });
       card.querySelector('.event-scope').addEventListener('change', e => { event.scope = e.target.value; });
       card.querySelector('.event-remove').addEventListener('click', () => { state.marketEvents.splice(index, 1); renderMarketEvents(); });
     });
@@ -1578,6 +1855,17 @@ export async function initUI(state) {
       scenarioStatus.textContent = error instanceof SyntaxError ? 'The selected file is not valid JSON.' : error.message;
     } finally {
       scenarioFileInput.value = '';
+    }
+  });
+
+  document.getElementById('loadExampleScenario').addEventListener('click', async () => {
+    scenarioStatus.textContent = 'Loading me.example.json…';
+    try {
+      const response = await fetch('./me.example.json', { cache: 'no-store' });
+      if (!response.ok) throw new Error(`Could not load me.example.json (${response.status}).`);
+      applyImportedScenario(reviveScenarioExport(await response.json()), 'me.example.json');
+    } catch (error) {
+      scenarioStatus.textContent = error instanceof SyntaxError ? 'me.example.json is not valid JSON.' : error.message;
     }
   });
 

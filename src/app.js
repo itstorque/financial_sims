@@ -125,7 +125,6 @@ async function main() {
     event.preventDefault();
     setActiveView(link.dataset.view);
   }));
-  document.addEventListener('finSim:showTracksView', () => setActiveView('tracks'));
   window.addEventListener('hashchange', () => setActiveView(viewForHash(), { updateHash: false }));
   setActiveView(viewForHash(), { updateHash: false });
 
@@ -233,7 +232,10 @@ async function main() {
     const retireAge = parseInt(document.getElementById('retireAge').value, 10);
     const numParticles = parseInt(document.getElementById('numParticles').value, 10) || 300;
     const useParticleFilter = document.getElementById('useParticleFilter').checked;
+    const seed = document.getElementById('simulationSeed').value.trim();
     const inflationRate = (parseFloat(document.getElementById('inflationRate').value) || 0) / 100;
+    const inflationVolatility = (parseFloat(document.getElementById('inflationVolatility').value) || 0) / 100;
+    const inflationPersistence = parseFloat(document.getElementById('inflationPersistence').value) || 0;
     const capGainsEnabled = document.getElementById('capGainsEnabled').checked;
     const capGainsRate = (parseFloat(document.getElementById('capGainsRate').value) || 0) / 100;
     const city = ui.getCity();
@@ -257,6 +259,8 @@ async function main() {
       useParticleFilter,
       retirementMonthIndex,
       inflationRate,
+      inflationModel: { volatility: inflationVolatility, persistence: inflationPersistence, distribution: { family: 'normal', scale: inflationVolatility } },
+      seed,
       capitalGains: { enabled: capGainsEnabled, rate: capGainsRate },
       withdrawalOrder: state.withdrawalOrder || [],
     });
@@ -282,6 +286,8 @@ async function main() {
       byAccountTimeline: out.byAccountTimeline,
       marketEventStats: out.marketEventStats,
       individualTraces: out.individualTraces,
+      individualTraceMeta: out.individualTraceMeta,
+      inflationTimeline: out.inflationTimeline,
       fireStats: out.fireStats,
       solvencyRate: out.solvencyRate,
       resampleEvents: out.resampleEvents,
@@ -305,6 +311,9 @@ async function main() {
           numParticles,
           useParticleFilter,
           inflationRate,
+          inflationVolatility,
+          inflationPersistence,
+          seed,
           capitalGains: { enabled: capGainsEnabled, rate: capGainsRate },
         },
         state: JSON.parse(JSON.stringify(serializeState(state))),
@@ -336,6 +345,7 @@ async function main() {
   });
 
   function inflationFactorAt(monthIndex) {
+    if (lastChartData?.inflationTimeline?.[monthIndex]) return lastChartData.inflationTimeline[monthIndex].p50;
     const rate = (parseFloat(document.getElementById('inflationRate').value) || 0) / 100;
     return Math.pow(1 + rate, monthIndex / 12);
   }
@@ -369,7 +379,7 @@ async function main() {
     const { labels, median, p10, p90 } = lastChartData;
     const showTraces = document.getElementById('showIndividualTraces').checked;
     const traceCount = parseInt(document.getElementById('individualTraceCount').value, 10) || 25;
-    const individualTraces = showTraces ? lastChartData.individualTraces.slice(0, traceCount).map(maybeDeflateSeries) : [];
+    const individualTraces = showTraces ? lastChartData.individualTraces.slice(0, traceCount).map((values, index) => ({ values: maybeDeflateSeries(values), ...lastChartData.individualTraceMeta[index] })) : [];
     const deflatedMedian = maybeDeflateSeries(median);
     const deflatedP10 = maybeDeflateSeries(p10);
     const deflatedP90 = maybeDeflateSeries(p90);

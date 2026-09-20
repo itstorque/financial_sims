@@ -6,11 +6,14 @@
 // This lets you model things like "10% through year end, then a -15% year,
 // then a steady 6% afterwards" (the trailing segment can use to:'9999-12').
 
+import { normalizeDistribution } from './distributions.js';
+
 export class ReturnsSchedule {
-  constructor(entries = [], { defaultAnnual = 0.06, defaultSigma = 0.08 } = {}) {
-    this.entries = entries.map(e => ({ ...e }));
+  constructor(entries = [], { defaultAnnual = 0.06, defaultSigma = 0.08, defaultDistribution = null } = {}) {
+    this.entries = entries.map(e => ({ ...e, distribution: normalizeDistribution(e.distribution, e.sigma ?? defaultSigma) }));
     this.defaultAnnual = defaultAnnual;
     this.defaultSigma = defaultSigma;
+    this.defaultDistribution = normalizeDistribution(defaultDistribution, defaultSigma);
   }
 
   static monthKey(date) {
@@ -21,14 +24,14 @@ export class ReturnsSchedule {
     const key = ReturnsSchedule.monthKey(date);
     for (const e of this.entries) {
       if (e.from <= key && key <= e.to) {
-        return { annual: e.annual, sigma: e.sigma ?? this.defaultSigma };
+        return { annual: e.annual, sigma: e.sigma ?? this.defaultSigma, distribution: normalizeDistribution(e.distribution, e.sigma ?? this.defaultSigma) };
       }
     }
-    return { annual: this.defaultAnnual, sigma: this.defaultSigma };
+    return { annual: this.defaultAnnual, sigma: this.defaultSigma, distribution: normalizeDistribution(this.defaultDistribution, this.defaultSigma) };
   }
 
   clone() {
-    return new ReturnsSchedule(this.entries, { defaultAnnual: this.defaultAnnual, defaultSigma: this.defaultSigma });
+    return new ReturnsSchedule(this.entries, { defaultAnnual: this.defaultAnnual, defaultSigma: this.defaultSigma, defaultDistribution: this.defaultDistribution });
   }
 }
 

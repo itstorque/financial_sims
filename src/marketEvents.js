@@ -1,7 +1,9 @@
 // Rare, path-dependent market regimes sampled independently for each particle.
-// An event is sampled once per path. If it occurs, its start month is chosen
-// uniformly within its trigger window and its annual return/sigma replace the
-// normal return schedule for matching accounts during its duration.
+// An event is sampled once per path. Window probabilities choose a uniform
+// start month after triggering; annual hazards are tested month-by-month. Its
+// return distribution replaces the normal schedule during the event.
+
+import { normalizeDistribution } from './distributions.js';
 
 let eventCounter = 0;
 
@@ -13,6 +15,8 @@ export function createMarketEvent({
   durationMonths = 12,
   annualReturn = -0.35,
   sigma = 0.25,
+  distribution = null,
+  probabilityMode = 'window',
   scope = 'investments',
 } = {}) {
   return {
@@ -23,15 +27,27 @@ export function createMarketEvent({
     durationMonths: Math.max(1, Math.round(Number(durationMonths) || 1)),
     annualReturn: Number(annualReturn) || 0,
     sigma: Math.max(0, Number(sigma) || 0),
+    distribution: normalizeDistribution(distribution, sigma),
+    probabilityMode: probabilityMode === 'annual' ? 'annual' : 'window',
     scope: scope === 'all' ? 'all' : 'investments',
   };
 }
 
 export function sampleMarketEvents(events, simulationMonths, random = Math.random) {
   return events.flatMap(event => {
-    if (random() >= event.probability) return [];
     const windowMonths = Math.max(1, Math.min(event.triggerWindowMonths, simulationMonths));
-    const startIndex = Math.floor(random() * windowMonths);
+    let startIndex;
+    if (event.probabilityMode === 'annual') {
+      const monthlyHazard = 1 - Math.pow(1 - event.probability, 1 / 12);
+      startIndex = -1;
+      for (let month = 0; month < windowMonths; month++) {
+        if (random() < monthlyHazard) { startIndex = month; break; }
+      }
+      if (startIndex < 0) return [];
+    } else {
+      if (random() >= event.probability) return [];
+      startIndex = Math.floor(random() * windowMonths);
+    }
     return [{
       eventId: event.id,
       startIndex,

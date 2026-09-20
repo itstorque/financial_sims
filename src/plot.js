@@ -146,17 +146,20 @@ export function renderBalanceChart(element, labels, median, p10, p90, scaleMode 
   const x = xValues(labels, layout.meta.logX);
   const customdata = layout.meta.logX ? labels : undefined;
   const hovertemplate = hoverTemplate(layout.meta.logX);
-  const pathTraces = individualTraces.map((values, index) => ({
-    name: `Path ${index + 1}`,
+  const pathTraces = individualTraces.map((path, index) => {
+    const values = Array.isArray(path) ? path : path.values;
+    const failed = !Array.isArray(path) && path.failed;
+    return {
+    name: failed ? `Failed path ${index + 1}` : `Path ${index + 1}`,
     x,
     y: values,
     customdata,
     type: 'scatter',
     mode: 'lines',
-    line: { color: layout.meta.colors.path, width: .75 },
+    line: { color: failed ? layout.meta.colors.danger : layout.meta.colors.path, width: failed ? 1.25 : .75 },
     hovertemplate,
     showlegend: false,
-  }));
+  }; });
   const traces = [
     ...pathTraces,
     { name: 'P10', x, y: p10, customdata, type: 'scatter', mode: 'lines', line: { color: layout.meta.colors.accentSoft, width: 1 }, hovertemplate },

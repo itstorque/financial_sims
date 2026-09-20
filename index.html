@@ -46,52 +46,55 @@
       </div>
     </dialog>
 
-    <section id="tracksView" class="tracks-page-view view-hidden" aria-label="Cash-flow tracks">
+    <dialog id="trackEditor" class="track-editor-dialog" aria-labelledby="trackEditorTitle">
       <div class="track-editor-shell">
         <header class="editor-header">
           <div>
             <span class="experimental-badge">Experimental</span>
-            <h2>Cash-flow tracks</h2>
+            <h2 id="trackEditorTitle">Cash-flow tracks</h2>
           </div>
+          <button id="closeTrackEditor" class="icon-button secondary" type="button" aria-label="Close track view">×</button>
         </header>
-        <div class="track-editor-toolbar">
-          <p>Each recurring cash flow has its own track. Select a clip to edit or splice it into a new condition.</p>
-          <div class="track-toolbar-right">
-            <span id="trackWindowLabel"></span>
-            <div class="track-zoom-controls" aria-label="Timeline zoom">
-              <button id="trackScissors" class="track-scissors" type="button" title="Splice by clicking a track" aria-label="Splice by clicking a track" aria-pressed="false">✂</button>
-              <button id="trackSmartEdit" class="track-smart-edit" type="button" title="Smart Edit: select a tile to edit with DeepSeek" aria-label="Smart Edit: select a tile to edit with DeepSeek" aria-pressed="false">✦</button>
-              <button id="trackZoomOut" class="secondary" type="button" title="Zoom out" aria-label="Zoom out">−</button>
-              <output id="trackZoomLevel" aria-live="polite">100%</output>
-              <button id="trackZoomIn" class="secondary" type="button" title="Zoom in" aria-label="Zoom in">+</button>
-              <button id="trackZoomFit" class="secondary" type="button" title="Fit timeline" aria-label="Fit timeline">Fit</button>
+        <div id="trackEditorContent" class="track-editor-content">
+          <div class="track-editor-toolbar">
+            <p>Each recurring cash flow has its own track. Select a clip to edit or splice it into a new condition.</p>
+            <div class="track-toolbar-right">
+              <span id="trackWindowLabel"></span>
+              <div class="track-zoom-controls" aria-label="Timeline zoom">
+                <button id="trackScissors" class="track-scissors" type="button" title="Splice by clicking a track" aria-label="Splice by clicking a track" aria-pressed="false">✂</button>
+                <button id="trackSmartEdit" class="track-smart-edit" type="button" title="Smart Edit: select a tile to edit with DeepSeek" aria-label="Smart Edit: select a tile to edit with DeepSeek" aria-pressed="false">✦</button>
+                <button id="trackZoomOut" class="secondary" type="button" title="Zoom out" aria-label="Zoom out">−</button>
+                <output id="trackZoomLevel" aria-live="polite">100%</output>
+                <button id="trackZoomIn" class="secondary" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+                <button id="trackZoomFit" class="secondary" type="button" title="Fit timeline" aria-label="Fit timeline">Fit</button>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="track-tabs">
-          <div class="track-tabs-group" role="tablist" aria-label="Track editor view">
-            <button id="trackTabTracks" class="track-tab active" type="button" role="tab" aria-selected="true">Tracks</button>
-            <button id="trackTabCashflow" class="track-tab" type="button" role="tab" aria-selected="false">Cash flow</button>
+          <div class="track-tabs">
+            <div class="track-tabs-group" role="tablist" aria-label="Track editor view">
+              <button id="trackTabTracks" class="track-tab active" type="button" role="tab" aria-selected="true">Tracks</button>
+              <button id="trackTabCashflow" class="track-tab" type="button" role="tab" aria-selected="false">Cash flow</button>
+            </div>
+            <button id="trackChartToggle" class="secondary track-chart-toggle view-hidden" type="button" aria-pressed="false" title="Hide cash-flow chart" aria-label="Hide cash-flow chart"><span class="track-chart-toggle-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14"><path d="M1 8s2.6-5 7-5 7 5 7 5-2.6 5-7 5-7-5-7-5Z" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="8" r="2.1" fill="currentColor"/></svg></span> Hide chart</button>
           </div>
-          <button id="trackChartFullscreen" class="secondary track-chart-toggle view-hidden" type="button" aria-pressed="false" title="Maximize tracks view"><span aria-hidden="true">⤢</span> Maximize tracks</button>
-        </div>
-        <div id="trackCashflowChart" class="track-cashflow-chart view-hidden">
-          <div class="track-cashflow-chart-header">
-            <strong>Projected income vs. spend</strong>
-            <span class="track-cashflow-chart-hint">Excludes transfers to taxable brokerage, retirement, and Roth accounts</span>
-            <div class="track-cashflow-legend">
-              <span class="income"><i></i>Income</span>
-              <span class="expense"><i></i>Spend</span>
+          <div id="trackCashflowChart" class="track-cashflow-chart view-hidden">
+            <div class="track-cashflow-chart-header">
+              <strong>Projected income vs. spend</strong>
+              <span class="track-cashflow-chart-hint">Excludes transfers to taxable brokerage, retirement, and Roth accounts</span>
+              <div class="track-cashflow-legend">
+                <span class="income"><i></i>Income</span>
+                <span class="expense"><i></i>Spend</span>
+              </div>
+            </div>
+            <div id="trackCashflowScroll" class="track-cashflow-scroll">
+              <svg id="trackCashflowSvg" class="track-cashflow-svg" preserveAspectRatio="none"></svg>
             </div>
           </div>
-          <div id="trackCashflowScroll" class="track-cashflow-scroll">
-            <svg id="trackCashflowSvg" class="track-cashflow-svg" preserveAspectRatio="none"></svg>
-          </div>
+          <div id="trackEditorBody" class="track-editor-body"></div>
+          <section id="trackInspector" class="track-inspector" aria-live="polite"></section>
         </div>
-        <div id="trackEditorBody" class="track-editor-body"></div>
-        <section id="trackInspector" class="track-inspector" aria-live="polite"></section>
       </div>
-    </section>
+    </dialog>
 
     <dialog id="smartTrackDialog" class="smart-track-dialog" aria-labelledby="smartTrackTitle">
       <form id="smartTrackForm" method="dialog">
@@ -191,7 +194,8 @@
               <label>Retirement age <input id="retireAge" type="number" value="65" min="0" max="120"/></label>
               <label class="settings-wide">City <select id="citySelect"></select></label>
               <label class="settings-wide">Particles <input id="numParticles" type="number" value="300" min="20" max="2000" step="20"/></label>
-              <label class="inline settings-wide"><input id="useParticleFilter" type="checkbox" checked/> Resampling</label>
+              <label class="inline settings-wide"><input id="useParticleFilter" type="checkbox"/> Condition paths on solvency (hides some failures)</label>
+              <label class="settings-wide">Random seed <input id="simulationSeed" type="text" value="base-case" placeholder="blank = new random run"/></label>
               <label class="inline settings-wide"><input id="realDollars" type="checkbox"/> Show in today's $</label>
               <label class="settings-wide">DeepSeek API key <input id="deepseekApiKey" type="password" autocomplete="off" placeholder="sk-..."/></label>
               <p class="settings-wide api-key-note">Stored only for this browser tab. The key is sent directly to DeepSeek when a Smart Cell or Smart Edit is requested.</p>
@@ -222,6 +226,7 @@
           <div class="row">
             <button id="exportScenario" class="secondary" type="button">Export JSON</button>
             <button id="loadScenario" type="button">Load JSON</button>
+            <button id="loadExampleScenario" class="secondary" type="button">Test load example</button>
             <input id="scenarioFile" type="file" accept="application/json,.json" hidden/>
           </div>
           <div class="row">
@@ -260,6 +265,7 @@
           <div class="row">
             <label>Default annual % <input id="defaultAnnual" type="number" step="0.1" value="6"/></label>
             <label>Default σ % <input id="defaultSigma" type="number" step="0.1" value="9"/></label>
+            <label>Default distribution <select id="defaultReturnDistribution"><option value="normal">Normal</option><option value="studentT">Student-t (fat tails)</option><option value="lognormal">Lognormal</option></select></label>
           </div>
         </details>
 
@@ -267,8 +273,10 @@
           <summary><h2>Inflation &amp; Taxes</h2></summary>
           <div class="row">
             <label>Inflation (annual %) <input id="inflationRate" type="number" step="0.1" value="3"/></label>
+            <label>Inflation uncertainty σ % <input id="inflationVolatility" type="number" min="0" step="0.1" value="0"/></label>
+            <label>Inflation persistence <input id="inflationPersistence" type="number" min="0" max="0.99" step="0.05" value="0.7"/></label>
           </div>
-          <p class="small">Escalates income/expense blocks over time (uncheck "Escalate with inflation" on a specific block to keep it fixed in nominal dollars). Use the "Show in today's $" toggle above to view forecasts in inflation-adjusted terms without re-running the simulation.</p>
+          <p class="small">The expected rate escalates participating cash flows. Optional σ and persistence create one shared inflation path per trajectory. Set σ to 0% for deterministic inflation. "Show in today's $" uses the simulated median price index.</p>
           <label class="inline"><input id="capGainsEnabled" type="checkbox"/> Model capital gains tax on taxable-brokerage withdrawals</label>
           <div class="row">
             <label>Capital gains tax rate % <input id="capGainsRate" type="number" step="0.5" value="15"/></label>
@@ -450,6 +458,17 @@
                 <tbody id="reportsEventsBody"></tbody>
               </table>
             </article>
+          </div>
+        </section>
+
+        <section id="tracksView" class="tracks-page-view view-hidden" aria-label="Cash-flow tracks">
+          <div class="track-editor-shell">
+            <header class="editor-header">
+              <div>
+                <span class="experimental-badge">Experimental</span>
+                <h2>Cash-flow tracks</h2>
+              </div>
+            </header>
           </div>
         </section>
       </div>

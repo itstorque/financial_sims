@@ -3,10 +3,11 @@
 // of uncertainty (error bars).
 
 import { ReturnsSchedule } from './returnsSchedule.js';
-import { blockActiveInMonth, sampledMonthlyAmount, nominalMonthlyAmount, loanPrincipal, loanMonthlyPayment, loanPaymentWindow } from './blocks.js';
+import { blockActiveInMonth, nominalMonthlyAmount, uncertaintyForBlockDate, loanPrincipal, loanMonthlyPayment, loanPaymentWindow } from './blocks.js';
 import { computeAnnualTax } from './taxes.js';
 import { ParticleFilter } from './particleFilter.js';
 import { createMarketEvent, sampleMarketEvents, activeMarketEvent } from './marketEvents.js';
+import { createSeededRandom, normalizeDistribution, sampleRelativeValue, sampleShock } from './distributions.js';
 
 export { ReturnsSchedule };
 
@@ -36,36 +37,74 @@ export function parseFlexibleDate(input) {
   return new Date(input);
 }
 
-function randNormal(mu = 0, sigma = 1) {
-  if (sigma === 0) return mu;
-  let u = 0, v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
-  const z = Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
-  return z * sigma + mu;
-}
-
 function percentile(sortedVals, p) {
   const idx = Math.min(sortedVals.length - 1, Math.max(0, Math.floor(sortedVals.length * p)));
   return sortedVals[idx];
 }
 
+function monthKeyToIndex(key) {
+  const [year, month] = String(key).split('-').map(Number);
+  return year * 12 + month - 1;
+}
+
 /** Precompute each block's sampled (noisy) contribution for every month of the sim, escalated by the global inflation rate for blocks opted into it (default true — see blocks.js `inflationAdjusted`). */
-export function precomputeBlockAmounts(blocks, startDate, months, inflationRate = 0) {
+export function precomputeBlockAmounts(blocks, startDate, months, inflationRateOrFactors = 0, random = Math.random) {
   const perMonth = [];
+  const annualSamples = new Map();
+  const growthStates = new Map();
+  const normalizedStartDate = parseFlexibleDate(startDate);
   for (let m = 0; m < months; m++) {
-    const date = monthIndex(startDate, m);
-    const inflationFactor = Math.pow(1 + inflationRate, m / 12);
+    const date = monthIndex(normalizedStartDate, m);
+    const inflationFactor = Array.isArray(inflationRateOrFactors)
+      ? (inflationRateOrFactors[m] ?? 1)
+      : Math.pow(1 + inflationRateOrFactors, m / 12);
     const row = {};
     for (const b of blocks) {
       if (!blockActiveInMonth(b, date)) continue;
-      let amt = sampledMonthlyAmount(b, date);
+      const nominal = nominalMonthlyAmount(b, date);
+      const entry = b.useCustomSchedule ? b.amountSchedule?.getEntryFor(date) : null;
+      const growthKey = `${b.id}:${entry?.from || b.startMonth || 'simulation-start'}`;
+      const growthStartIndex = monthKeyToIndex(entry?.from || b.startMonth || ReturnsSchedule.monthKey(normalizedStartDate));
+      const currentIndex = date.getFullYear() * 12 + date.getMonth();
+      const elapsedYears = Math.max(0, Math.floor((currentIndex - growthStartIndex) / 12));
+      let growthState = growthStates.get(growthKey) || { completedYears: 0, factor: 1 };
+      while (growthState.completedYears < elapsedYears) {
+        const realizedGrowth = (b.category === 'income' ? Number(b.annualGrowthRate) || 0 : 0)
+          + sampleShock(normalizeDistribution(b.growthUncertainty, 0), random);
+        growthState = { completedYears: growthState.completedYears + 1, factor: growthState.factor * Math.max(0, 1 + realizedGrowth) };
+      }
+      growthStates.set(growthKey, growthState);
+      const sampleKey = b.kind === 'one-time' ? `${b.id}:once` : `${b.id}:${date.getFullYear()}:${entry?.from || 'simple'}:${entry?.to || ''}:growth-${elapsedYears}`;
+      if (!annualSamples.has(sampleKey)) {
+        const reportedValue = (b.kind === 'one-time' ? nominal : nominal * 12) * growthState.factor;
+        annualSamples.set(sampleKey, sampleRelativeValue(reportedValue, uncertaintyForBlockDate(b, date), random));
+      }
+      let amt = b.kind === 'one-time' ? annualSamples.get(sampleKey) : annualSamples.get(sampleKey) / 12;
       if (b.inflationAdjusted !== false) amt *= inflationFactor;
       row[b.id] = amt;
     }
     perMonth.push(row);
   }
   return perMonth;
+}
+
+function buildInflationPath(months, annualRate, model, random) {
+  const factors = new Array(months);
+  const volatility = Math.max(0, Number(model?.volatility) || 0);
+  const persistence = Math.min(0.99, Math.max(0, Number(model?.persistence) || 0));
+  const distribution = normalizeDistribution(model?.distribution, volatility);
+  const baselineMonthlyRate = Math.pow(1 + annualRate, 1 / 12) - 1;
+  let factor = 1;
+  let deviation = 0;
+  for (let m = 0; m < months; m++) {
+    if (m > 0) {
+      const innovation = sampleShock({ ...distribution, scale: (distribution.scale || 0) / Math.sqrt(12) }, random);
+      deviation = persistence * deviation + Math.sqrt(1 - persistence ** 2) * innovation;
+      factor *= 1 + Math.max(-0.95, baselineMonthlyRate + deviation);
+    }
+    factors[m] = factor;
+  }
+  return factors;
 }
 
 /** Aggregate pre-tax, non-retirement income by calendar year and compute the effective tax rate for each year. */
@@ -177,19 +216,22 @@ function precomputeLoans(blocks) {
 }
 
 class ParticleState {
-  constructor(accountBalances, blockAmounts, effectiveRatesByYear, marketEventOccurrences = [], costBasis = {}, netWorthHistory = []) {
+  constructor(accountBalances, blockAmounts, effectiveRatesByYear, marketEventOccurrences = [], costBasis = {}, netWorthHistory = [], inflationFactors = []) {
     this.accountBalances = accountBalances; // {id: number}
     this.blockAmounts = blockAmounts;       // shared reference, immutable
     this.effectiveRatesByYear = effectiveRatesByYear; // shared reference, immutable
     this.marketEventOccurrences = marketEventOccurrences; // sampled once per path
     this.costBasis = costBasis; // {id: number} — tracked for 'taxable' accounts when capital-gains modeling is enabled
     this.netWorthHistory = netWorthHistory;
+    this.inflationFactors = inflationFactors;
     this.maximumDebt = 0;
     this.hasShortfall = false;
+    this.failureMonthIndex = null;
   }
   clone() {
-    const clone = new ParticleState({ ...this.accountBalances }, this.blockAmounts, this.effectiveRatesByYear, this.marketEventOccurrences, { ...this.costBasis }, [...this.netWorthHistory]);
+    const clone = new ParticleState({ ...this.accountBalances }, this.blockAmounts, this.effectiveRatesByYear, this.marketEventOccurrences, { ...this.costBasis }, [...this.netWorthHistory], this.inflationFactors);
     clone.hasShortfall = this.hasShortfall;
+    clone.failureMonthIndex = this.failureMonthIndex;
     clone.maximumDebt = this.maximumDebt;
     return clone;
   }
@@ -204,6 +246,7 @@ export class Simulator {
     city = 'Default', numParticles = 300, useParticleFilter = true,
     retirementMonthIndex = null, marketEvents = [],
     inflationRate = 0, capitalGains = null, withdrawalOrder = [],
+    inflationModel = null, seed = '', random = null,
   }) {
     this.startDate = parseFlexibleDate(startDate);
     this.months = months;
@@ -218,6 +261,8 @@ export class Simulator {
     // Global annual inflation rate (fraction, e.g. 0.03). Escalates the nominal
     // amount of any block with `inflationAdjusted !== false` over time.
     this.inflationRate = Number(inflationRate) || 0;
+    this.inflationModel = inflationModel || { volatility: 0, persistence: 0.7, distribution: { family: 'normal', scale: 0 } };
+    this.random = random || createSeededRandom(seed);
     // Optional, simplified capital-gains tax on taxable-brokerage withdrawals.
     // Off by default — a planning simplification (flat rate, no long/short-term
     // distinction, assumes the account's starting balance is 100% cost basis).
@@ -247,7 +292,8 @@ export class Simulator {
     //    block amounts and its own resulting effective tax rates by year.
     let particles = [];
     for (let i = 0; i < this.numParticles; i++) {
-      const blockAmounts = precomputeBlockAmounts(blocks, startDate, months, this.inflationRate);
+      const inflationFactors = buildInflationPath(months, this.inflationRate, this.inflationModel, this.random);
+      const blockAmounts = precomputeBlockAmounts(blocks, startDate, months, inflationFactors, this.random);
       const effectiveRatesByYear = computeEffectiveRatesByYear(blocks, accounts, blockAmounts, startDate, months, city);
       const balances = {};
       const costBasis = {};
@@ -257,22 +303,23 @@ export class Simulator {
         // treated as 100% cost basis (no embedded unrealized gain at t=0).
         costBasis[id] = acc.type === 'taxable' ? acc.balance : 0;
       }
-      const marketEventOccurrences = sampleMarketEvents(this.marketEvents, months);
+      const marketEventOccurrences = sampleMarketEvents(this.marketEvents, months, this.random);
       for (const occurrence of marketEventOccurrences) {
         eventTriggerCounts[occurrence.eventId]++;
         const starts = eventStartCounts[occurrence.eventId];
         starts[occurrence.startIndex] = (starts[occurrence.startIndex] || 0) + 1;
       }
-      particles.push(new ParticleState(balances, blockAmounts, effectiveRatesByYear, marketEventOccurrences, costBasis));
+      particles.push(new ParticleState(balances, blockAmounts, effectiveRatesByYear, marketEventOccurrences, costBasis, [], inflationFactors));
     }
 
-    const pf = new ParticleFilter(particles, { enabled: this.useParticleFilter, essThresholdFraction: 0.5, resamplePenalty: 0.02 });
+    const pf = new ParticleFilter(particles, { enabled: this.useParticleFilter, essThresholdFraction: 0.5, resamplePenalty: 0.02, random: this.random });
 
     const timeline = []; // per month: {p10,p50,p90,mean}
     const assetOnlyTimeline = []; // financial assets only; excludes all debt balances
     const byAccountTypeTimeline = []; // per month: {checking,hysa,taxable,retirement,debt}
     const byAccountTimeline = []; // per month: mean balance keyed by account id
     const retirementReadinessTimeline = []; // per month: FIRE target + share of paths above it
+    const inflationTimeline = []; // per month: cumulative price-index percentiles
     let maximumDebt = 0;
     let resampleEvents = 0;
     let fireSuccessRate = null;
@@ -288,13 +335,13 @@ export class Simulator {
         for (const [id, acc] of Object.entries(accounts)) {
           const event = activeMarketEvent(this.marketEvents, p.marketEventOccurrences, m, acc);
           const sched = event
-            ? { annual: event.annualReturn, sigma: event.sigma }
+            ? { annual: event.annualReturn, sigma: event.sigma, distribution: event.distribution }
             : this._returnsScheduleFor(acc).getFor(date);
-          const schedSigmaMonthly = (sched.sigma || 0) / Math.sqrt(12);
-          const extraSigma = acc.sigma || 0;
-          const totalSigma = Math.sqrt(schedSigmaMonthly ** 2 + extraSigma ** 2);
+          const distribution = normalizeDistribution(sched.distribution, sched.sigma);
+          const monthlyDistribution = { ...distribution, scale: (distribution.scale || 0) / Math.sqrt(12) };
+          const extraDistribution = { family: 'normal', scale: (acc.sigma || 0) / Math.sqrt(12) };
           const mu = sched.annual / 12;
-          const noise = randNormal(mu, totalSigma);
+          const noise = mu + sampleShock(monthlyDistribution, this.random) + sampleShock(extraDistribution, this.random);
           p.accountBalances[id] *= (1 + noise);
           if (acc.type !== 'debt') p.accountBalances[id] = Math.max(0, p.accountBalances[id]);
         }
@@ -321,7 +368,7 @@ export class Simulator {
             // expense
             const sourceId = b.sourceAccountId && accounts[b.sourceAccountId] ? b.sourceAccountId : defaultChecking?.id;
             const draw = drawFromAccounts(p.accountBalances, accounts, amt, sourceId, { withdrawalOrder: this.withdrawalOrder, costBasis: p.costBasis, capitalGains: this.capitalGains });
-            if (draw.shortfall > 0) p.hasShortfall = true;
+            if (draw.shortfall > 0) { p.hasShortfall = true; if (p.failureMonthIndex == null) p.failureMonthIndex = m; }
 
             // optional: expense also functions as a debt payment
             if (b.debtAccountId && accounts[b.debtAccountId]) {
@@ -339,11 +386,11 @@ export class Simulator {
           if (key === block.startMonth) {
             if (accounts[block.debtAccountId]) p.accountBalances[block.debtAccountId] -= principal; // loan originated
             const draw = drawFromAccounts(p.accountBalances, accounts, downPayment, sourceId, { withdrawalOrder: this.withdrawalOrder, costBasis: p.costBasis, capitalGains: this.capitalGains });
-            if (draw.shortfall > 0) p.hasShortfall = true;
+            if (draw.shortfall > 0) { p.hasShortfall = true; if (p.failureMonthIndex == null) p.failureMonthIndex = m; }
           }
           if (key >= window[0] && key <= window[1]) {
             const draw = drawFromAccounts(p.accountBalances, accounts, payment, sourceId, { withdrawalOrder: this.withdrawalOrder, costBasis: p.costBasis, capitalGains: this.capitalGains });
-            if (draw.shortfall > 0) p.hasShortfall = true;
+            if (draw.shortfall > 0) { p.hasShortfall = true; if (p.failureMonthIndex == null) p.failureMonthIndex = m; }
             if (accounts[block.debtAccountId]) {
               const paidDown = Math.min(draw.withdrawn, -p.accountBalances[block.debtAccountId]); // don't overpay past zero
               p.accountBalances[block.debtAccountId] += Math.max(0, paidDown);
@@ -366,11 +413,14 @@ export class Simulator {
         mean: assetTotals.reduce((a, b) => a + b, 0) / assetTotals.length,
       });
 
-      const monthlyFireNumber = this._fireNumberAt(m);
+      const fireNumbers = pf.particles.map(p => this._fireNumberAt(m, p.inflationFactors[m]));
+      const monthlyFireNumber = percentile([...fireNumbers].sort((a, b) => a - b), 0.50);
       retirementReadinessTimeline.push({
         fireNumber: monthlyFireNumber,
-        successRate: totals.filter(value => value >= monthlyFireNumber).length / totals.length,
+        successRate: pf.particles.filter((p, index) => p.total() >= fireNumbers[index]).length / totals.length,
       });
+      const inflationFactors = pf.particles.map(p => p.inflationFactors[m]).sort((a, b) => a - b);
+      inflationTimeline.push({ p10: percentile(inflationFactors, 0.10), p50: percentile(inflationFactors, 0.50), p90: percentile(inflationFactors, 0.90) });
 
       const typeSums = { checking: 0, hysa: 0, taxable: 0, retirement: 0, roth: 0, debt: 0 };
       const accountSums = Object.fromEntries(Object.keys(accounts).map(id => [id, 0]));
@@ -389,8 +439,8 @@ export class Simulator {
       byAccountTimeline.push(accountSums);
 
       if (this.retirementMonthIndex != null && m === this.retirementMonthIndex) {
-        fireNumber = this._fireNumberAt(m);
-        fireSuccessRate = totals.filter(v => v >= fireNumber).length / totals.length;
+        fireNumber = monthlyFireNumber;
+        fireSuccessRate = retirementReadinessTimeline.at(-1).successRate;
       }
 
       // --- particle-filter weighting + resampling ---
@@ -410,9 +460,10 @@ export class Simulator {
       ? { fireNumber, successRate: fireSuccessRate, retirementMonthIndex: this.retirementMonthIndex }
       : null;
     const traceLimit = Math.min(50, pf.particles.length);
-    const traceStep = pf.particles.length / Math.max(1, traceLimit);
-    const individualTraces = Array.from({ length: traceLimit }, (_, index) =>
-      [...pf.particles[Math.min(pf.particles.length - 1, Math.floor(index * traceStep))].netWorthHistory]);
+    const orderedForTraces = [...pf.particles.filter(p => p.hasShortfall), ...pf.particles.filter(p => !p.hasShortfall)];
+    const selectedTraceParticles = orderedForTraces.slice(0, traceLimit);
+    const individualTraces = selectedTraceParticles.map(p => [...p.netWorthHistory]);
+    const individualTraceMeta = selectedTraceParticles.map(p => ({ failed: p.hasShortfall, failureMonthIndex: p.failureMonthIndex }));
 
     return {
       timeline,
@@ -420,6 +471,7 @@ export class Simulator {
       byAccountTypeTimeline,
       byAccountTimeline,
       retirementReadinessTimeline,
+      inflationTimeline,
       solvencyRate,
       bankruptcyCount: bankruptCount,
       particleCount: this.numParticles,
@@ -445,14 +497,14 @@ export class Simulator {
         })),
       })),
       individualTraces,
+      individualTraceMeta,
       finalParticles: pf.particles,
     };
   }
 
   /** 25x the nominal (inflation-escalated) annual continuous-expense run-rate active at month `m` (excludes debt/loan paydowns). */
-  _fireNumberAt(m) {
+  _fireNumberAt(m, inflationFactor = Math.pow(1 + this.inflationRate, m / 12)) {
     const date = monthIndex(this.startDate, m);
-    const inflationFactor = Math.pow(1 + this.inflationRate, m / 12);
     let annualExpense = 0;
     for (const b of this.blocks) {
       if (b.category !== 'expense' || b.kind !== 'continuous') continue;

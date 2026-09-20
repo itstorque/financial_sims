@@ -9,7 +9,7 @@ import { createBlock, createLoanBlock, AmountSchedule, buildScheduleClips, splic
 import { ReturnsSchedule } from './returnsSchedule.js';
 import { cities } from './taxes.js';
 import { maxHomePrice } from './affordability.js';
-import { createScenarioExport, saveAutosave, loadAutosave, listScenarios, saveScenario, loadScenario, deleteScenario } from './persistence.js';
+import { createScenarioExport, saveAutosave, loadAutosave, clearAutosave, listScenarios, saveScenario, loadScenario, deleteScenario } from './persistence.js';
 import { buildBaseScenario } from './baseScenario.js';
 import { loadMeScenario } from './meScenario.js';
 
@@ -94,7 +94,7 @@ export async function initUI(state) {
   const editorBlockList = document.getElementById('editorBlockList');
   const editorDetail = document.getElementById('editorDetail');
   const editorBlockCount = document.getElementById('editorBlockCount');
-  const editorState = { blockId: null, clipIndex: 0 };
+  const editorState = { blockId: null, clipIndex: 0, timelineScrollLeft: 0 };
 
   for (const c of cities()) {
     const opt = document.createElement('option');
@@ -238,10 +238,15 @@ export async function initUI(state) {
     editorState.clipIndex = Math.min(editorState.clipIndex, Math.max(0, clips.length - 1));
     const selected = clips[editorState.clipIndex];
     const totalMonths = Math.max(1, keyToIdx(clips.at(-1).to) - keyToIdx(clips[0].from) + 1);
+    const pixelsPerMonth = 8;
+    const timelineWidth = totalMonths * pixelsPerMonth;
     const timeline = clips.map((clip, index) => {
       const months = keyToIdx(clip.to) - keyToIdx(clip.from) + 1;
-      return `<button class="clip ${index === editorState.clipIndex ? 'selected' : ''} clip-color-${index % 5}" style="flex-grow:${months};flex-basis:${Math.max(68, months / totalMonths * 720)}px" data-clip-index="${index}" type="button" title="${escapeHtml(clip.name)}: ${clip.from} to ${clip.to}">
-        <strong>${escapeHtml(clip.name)}</strong><small>${formatCompactMoney(clip.annualAmount)}/yr</small>
+      const width = months * pixelsPerMonth;
+      return `<button class="clip ${index === editorState.clipIndex ? 'selected' : ''} clip-color-${index % 5}" style="width:${width}px" data-clip-index="${index}" type="button" title="${escapeHtml(clip.name)}: ${clip.from} to ${clip.to}">
+        <strong>${escapeHtml(clip.name)}</strong>
+        <span class="clip-dates"><span><b>From</b><time>${clip.from}</time></span><span><b>To</b><time>${clip.to}</time></span></span>
+        <small>${formatCompactMoney(clip.annualAmount)}/yr</small>
       </button>`;
     }).join('');
 
@@ -252,9 +257,11 @@ export async function initUI(state) {
         <button id="useSimpleAmount" class="secondary" type="button">Use simple amount</button>
       </div>
       <section class="timeline-studio" aria-label="Amount schedule timeline">
-        <div class="timeline-toolbar"><div><strong>Schedule clips</strong><p>Choose a clip to edit it, or splice it into two periods.</p></div><span>${clips[0]?.from} → ${clips.at(-1)?.to}</span></div>
-        <div class="clip-track">${timeline}</div>
-        <div class="timeline-ruler"><span>${clips[0]?.from}</span><span>simulation timeline</span><span>${clips.at(-1)?.to}</span></div>
+        <div class="timeline-toolbar"><div><strong>Schedule clips</strong><p>Select a clip to edit or split it into two periods. Scroll horizontally to view the full timeline.</p></div><span>${clips[0]?.from} → ${clips.at(-1)?.to}</span></div>
+        <div class="timeline-scroll">
+          <div class="clip-track" style="width:${timelineWidth}px">${timeline}</div>
+          <div class="timeline-ruler" style="width:${timelineWidth}px"><span>${clips[0]?.from}</span><span>simulation timeline</span><span>${clips.at(-1)?.to}</span></div>
+        </div>
       </section>
       <section class="editor-section clip-flow-settings">
         <div class="section-title"><strong>Cash-flow settings</strong><span>These settings apply to every clip on this timeline</span></div>
@@ -283,8 +290,15 @@ export async function initUI(state) {
         </div>
       </section>` : ''}`;
 
+    const timelineScroll = editorDetail.querySelector('.timeline-scroll');
+    timelineScroll.scrollLeft = editorState.timelineScrollLeft;
+    timelineScroll.addEventListener('scroll', () => { editorState.timelineScrollLeft = timelineScroll.scrollLeft; }, { passive: true });
     editorDetail.querySelectorAll('[data-clip-index]').forEach(button => {
-      button.addEventListener('click', () => { editorState.clipIndex = Number(button.dataset.clipIndex); renderBlockEditor(); });
+      button.addEventListener('click', () => {
+        editorState.timelineScrollLeft = timelineScroll.scrollLeft;
+        editorState.clipIndex = Number(button.dataset.clipIndex);
+        renderBlockEditor();
+      });
     });
     document.getElementById('useSimpleAmount').addEventListener('click', () => {
       const active = block.amountSchedule.entries.find(clip => clip.annualAmount !== 0) || block.amountSchedule.entries[0];
@@ -845,6 +859,17 @@ export async function initUI(state) {
     deleteScenario(name);
     refreshScenarioOptions();
     scenarioStatus.textContent = `Deleted "${name}".`;
+  });
+
+  document.getElementById('resetToBase').addEventListener('click', () => {
+    // Clears the autosaved working session so the next load falls back to
+    // `me.json` (if present) or the generic base scenario. This is the fix
+    // for "my starting balances look stale" — the autosaved session always
+    // takes priority over the base scenario, so updates to the base/me.json
+    // numbers are otherwise invisible once a session has been autosaved.
+    if (!confirm('Discard your current working session and reload the base scenario? This clears the autosave (named scenarios are unaffected).')) return;
+    clearAutosave();
+    location.reload();
   });
 
   refreshScenarioOptions();

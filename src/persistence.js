@@ -3,7 +3,7 @@
 
 import { Account } from './accounts.js';
 import { ReturnsSchedule } from './returnsSchedule.js';
-import { createBlock } from './blocks.js';
+import { createBlock, createLoanBlock } from './blocks.js';
 
 const AUTOSAVE_KEY = 'finSim.autosave.v1';
 const SCENARIOS_KEY = 'finSim.scenarios.v1';
@@ -32,6 +32,19 @@ export function serializeState(state) {
   };
 }
 
+/** Build a portable, versioned snapshot suitable for downloading and sharing. */
+export function createScenarioExport(name, settings, state, notes = '') {
+  return {
+    format: 'financial-sims-scenario',
+    version: 1,
+    name: name || 'Untitled scenario',
+    exportedAt: new Date().toISOString(),
+    settings: { ...settings },
+    notes,
+    state: serializeState(state),
+  };
+}
+
 /** Rebuild live objects (Account instances w/ nested ReturnsSchedule, blocks, global ReturnsSchedule) from plain data. */
 export function reviveState(data) {
   const accounts = {};
@@ -41,7 +54,7 @@ export function reviveState(data) {
       useCustomReturns: a.useCustomReturns, returnsSchedule: reviveReturnsSchedule(a.returnsSchedule),
     });
   }
-  const blocks = (data.blocks || []).map(b => createBlock(b));
+  const blocks = (data.blocks || []).map(b => (b.kind === 'loan' ? createLoanBlock(b) : createBlock(b)));
   const globalReturnsSchedule = reviveReturnsSchedule(data.globalReturnsSchedule);
   return { accounts, blocks, globalReturnsSchedule };
 }
@@ -52,8 +65,8 @@ function safeParse(json) {
 
 // --- Autosave (silent, continuous background persistence of the working session) ---
 
-export function saveAutosave(settings, state) {
-  const payload = { settings, state: serializeState(state) };
+export function saveAutosave(settings, state, notes = '') {
+  const payload = { settings, state: serializeState(state), notes };
   localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(payload));
 }
 
@@ -62,7 +75,7 @@ export function loadAutosave() {
   if (!raw) return null;
   const parsed = safeParse(raw);
   if (!parsed) return null;
-  return { settings: parsed.settings || {}, state: reviveState(parsed.state || {}) };
+  return { settings: parsed.settings || {}, state: reviveState(parsed.state || {}), notes: parsed.notes || '' };
 }
 
 export function clearAutosave() {
@@ -83,9 +96,9 @@ export function listScenarios() {
   return Object.keys(loadScenarioBank()).sort((a, b) => a.localeCompare(b));
 }
 
-export function saveScenario(name, settings, state) {
+export function saveScenario(name, settings, state, notes = '') {
   const bank = loadScenarioBank();
-  bank[name] = { settings, state: serializeState(state), savedAt: new Date().toISOString() };
+  bank[name] = { settings, state: serializeState(state), notes, savedAt: new Date().toISOString() };
   saveScenarioBank(bank);
 }
 
@@ -93,7 +106,7 @@ export function loadScenario(name) {
   const bank = loadScenarioBank();
   const entry = bank[name];
   if (!entry) return null;
-  return { settings: entry.settings || {}, state: reviveState(entry.state || {}) };
+  return { settings: entry.settings || {}, state: reviveState(entry.state || {}), notes: entry.notes || '' };
 }
 
 export function deleteScenario(name) {

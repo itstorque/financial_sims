@@ -3,34 +3,50 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Financial Sims — Static</title>
+    <title>Financial Simulator</title>
     <link rel="stylesheet" href="styles.css" />
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   </head>
   <body>
-    <header>
-      <h1>Financial Simulator (static)</h1>
-      <div class="controls">
-        <label>Current Age <input id="currentAge" type="number" value="35" min="0" max="120"/></label>
-        <label>Target Retirement Age <input id="retireAge" type="number" value="65" min="0" max="120"/></label>
-        <label>City <select id="citySelect"></select></label>
-        <label>Particles <input id="numParticles" type="number" value="300" min="20" max="2000" step="20"/></label>
-        <label class="inline"><input id="useParticleFilter" type="checkbox" checked/> Bankruptcy-aware resampling</label>
-        <button id="runSim">Run Simulation</button>
-      </div>
-      <div id="summaryStats" class="summary"></div>
-    </header>
+    <div class="app-shell">
+      <aside class="app-nav">
+        <div class="brand"><span class="brand-symbol" aria-hidden="true">F</span><h1>Financial Simulator</h1></div>
+        <nav aria-label="Sections">
+          <a href="#scenarios">Plan</a>
+          <a href="#forecast">Reports</a>
+        </nav>
+        <div class="nav-section-title"><span>Accounts</span></div>
+        <div id="navAccounts" class="nav-accounts"></div>
+        <div class="nav-footer">Local workspace</div>
+      </aside>
 
-    <main>
+      <div class="workspace">
+        <header class="topbar">
+          <div class="topbar-title">Plan</div>
+          <div class="controls">
+            <label>Current age <input id="currentAge" type="number" value="35" min="0" max="120"/></label>
+            <label>Retirement age <input id="retireAge" type="number" value="65" min="0" max="120"/></label>
+            <label>City <select id="citySelect"></select></label>
+            <label>Particles <input id="numParticles" type="number" value="300" min="20" max="2000" step="20"/></label>
+            <label class="inline"><input id="useParticleFilter" type="checkbox" checked/> Resampling</label>
+            <button id="runSim" class="primary">Run simulation</button>
+          </div>
+          <div id="summaryStats" class="summary"></div>
+        </header>
+
+        <main>
       <section class="left">
-        <details open>
+        <details id="scenarios" open>
           <summary><h2>Scenarios</h2></summary>
-          <p class="small">Your working session (accounts, income/expenses, returns schedule, and the top settings) is auto-saved to this browser. Use this to save/load named copies of a full plan.</p>
           <div class="row">
-            <label>Scenario name <input id="scenarioName" type="text" placeholder="e.g. Base case"/></label>
+            <label>Scenario name <input id="scenarioName" type="text" placeholder="Base case"/></label>
+          </div>
+          <div class="row">
+            <label>Notes <textarea id="scenarioNotes" rows="3"></textarea></label>
           </div>
           <div class="row">
             <button id="saveScenario">Save</button>
+            <button id="exportScenario" class="secondary" type="button">Export JSON</button>
             <select id="scenarioSelect"></select>
             <button id="loadScenario">Load</button>
             <button id="deleteScenario" class="remove">Delete</button>
@@ -38,24 +54,24 @@
           <div id="scenarioStatus" class="small"></div>
         </details>
 
-        <details open>
+        <details id="accounts" open>
           <summary><h2>Accounts</h2></summary>
           <div id="accounts"></div>
           <button id="addAccount">+ Add Account</button>
         </details>
 
-        <details open>
+        <details id="cash-flow" open>
           <summary><h2>Income &amp; Expenses</h2></summary>
           <div id="blocks"></div>
           <div class="block-actions">
             <button id="addIncome">+ Add Income</button>
             <button id="addExpense">+ Add Expense</button>
+            <button id="addLoan" class="secondary" type="button">+ Add Financed Purchase (Loan)</button>
           </div>
         </details>
 
         <details>
           <summary><h2>Global Returns Schedule</h2></summary>
-          <p class="small">Segments override the default for their date range (e.g. a hot year followed by a crash). Any account can instead use its own custom schedule.</p>
           <div id="returnsSegments"></div>
           <button id="addReturnSegment">+ Add Segment</button>
           <div class="row">
@@ -79,17 +95,30 @@
         </details>
       </section>
 
-      <section class="right">
-        <h3>Net Worth Percentile Bands</h3>
-        <canvas id="balanceChart" height="320"></canvas>
-        <h3>Balances by Account Type (mean)</h3>
-        <canvas id="compositionChart" height="260"></canvas>
+      <section id="forecast" class="right" aria-label="Simulation results">
+        <div class="results-heading">
+          <h2>Forecast</h2>
+        </div>
+        <article class="chart-card">
+          <div class="chart-heading">
+            <h3>Net worth range</h3>
+          </div>
+          <div class="chart-frame chart-frame--large">
+            <canvas id="balanceChart"></canvas>
+          </div>
+        </article>
+        <article class="chart-card">
+          <div class="chart-heading">
+            <h3>Account mix</h3>
+          </div>
+          <div class="chart-frame chart-frame--small">
+            <canvas id="compositionChart"></canvas>
+          </div>
+        </article>
       </section>
-    </main>
-
-    <footer>
-      <small>Static demo — modular code in <code>src/</code>. Tax figures are simplified planning approximations, not tax advice.</small>
-    </footer>
+        </main>
+      </div>
+    </div>
 
     <script type="module" src="src/app.js"></script>
   </body>

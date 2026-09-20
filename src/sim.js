@@ -3,7 +3,7 @@
 // of uncertainty (error bars).
 
 import { ReturnsSchedule } from './returnsSchedule.js';
-import { blockActiveInMonth, sampledMonthlyAmount } from './blocks.js';
+import { blockActiveInMonth, sampledMonthlyAmount, nominalMonthlyAmount, loanPrincipal, loanMonthlyPayment, loanPaymentWindow } from './blocks.js';
 import { computeAnnualTax } from './taxes.js';
 import { ParticleFilter } from './particleFilter.js';
 
@@ -14,6 +14,25 @@ export function monthIndex(startDate, monthsFromStart) {
   d.setDate(1);
   d.setMonth(d.getMonth() + monthsFromStart);
   return d;
+}
+
+/**
+ * Parse a Date, or a "YYYY-MM-DD"/"YYYY-MM" string, into a *local* Date at
+ * midnight on that day. Plain `new Date("2027-06-01")` parses date-only ISO
+ * strings as UTC per spec, which silently shifts the calendar date (often by
+ * a full day, sometimes crossing a month boundary) once read back with local
+ * getters (getFullYear/getMonth/etc.) in any timezone behind UTC. Since the
+ * whole simulation keys months via local getters, we must construct the
+ * start date from local components instead of letting the string be
+ * UTC-parsed.
+ */
+export function parseFlexibleDate(input) {
+  if (input instanceof Date) return new Date(input.getTime());
+  if (typeof input === 'string') {
+    const m = input.match(/^(\d{4})-(\d{2})(?:-(\d{2}))?/);
+    if (m) return new Date(Number(m[1]), Number(m[2]) - 1, m[3] ? Number(m[3]) : 1);
+  }
+  return new Date(input);
 }
 
 function randNormal(mu = 0, sigma = 1) {
@@ -37,7 +56,7 @@ function precomputeBlockAmounts(blocks, startDate, months) {
     const date = monthIndex(startDate, m);
     const row = {};
     for (const b of blocks) {
-      if (blockActiveInMonth(b, date)) row[b.id] = sampledMonthlyAmount(b);
+      if (blockActiveInMonth(b, date)) row[b.id] = sampledMonthlyAmount(b, date);
     }
     perMonth.push(row);
   }
@@ -72,6 +91,17 @@ function firstAccountOfType(accounts, type) {
   return Object.values(accounts).find(a => a.type === type);
 }
 
+/** Precompute deterministic per-loan figures (principal, payment, payment window) once. */
+function precomputeLoans(blocks) {
+  return blocks.filter(b => b.kind === 'loan').map(b => ({
+    block: b,
+    principal: loanPrincipal(b),
+    downPayment: b.purchasePrice * b.downPaymentPct,
+    payment: loanMonthlyPayment(b),
+    window: loanPaymentWindow(b), // [startKey, endKey]
+  }));
+}
+
 class ParticleState {
   constructor(accountBalances, blockAmounts, effectiveRatesByYear) {
     this.accountBalances = accountBalances; // {id: number}
@@ -92,7 +122,7 @@ export class Simulator {
     city = 'Default', numParticles = 300, useParticleFilter = true,
     retirementMonthIndex = null,
   }) {
-    this.startDate = new Date(startDate);
+    this.startDate = parseFlexibleDate(startDate);
     this.months = months;
     this.accounts = accounts;
     this.blocks = blocks;
@@ -110,6 +140,7 @@ export class Simulator {
   run() {
     const { startDate, months, accounts, blocks, city } = this;
     const defaultChecking = firstAccountOfType(accounts, 'checking');
+    const loans = precomputeLoans(blocks);
 
     // 1) Build N independent particles, each with its own noise draws for
     //    block amounts and its own resulting effective tax rates by year.
@@ -133,6 +164,7 @@ export class Simulator {
     for (let m = 0; m < months; m++) {
       const date = monthIndex(startDate, m);
       const year = date.getFullYear();
+      const key = ReturnsSchedule.monthKey(date);
 
       for (const p of pf.particles) {
         // --- apply returns to every account ---
@@ -172,6 +204,24 @@ export class Simulator {
               const debtAcc = accounts[b.debtAccountId];
               const paidDown = Math.min(amt, -p.accountBalances[b.debtAccountId]); // don't overpay past zero
               p.accountBalances[b.debtAccountId] += Math.max(0, paidDown);
+            }
+          }
+        }
+
+        // --- financed purchases (loan blocks): origination + amortized payment ---
+        for (const loan of loans) {
+          const { block, principal, downPayment, payment, window } = loan;
+          const sourceId = block.sourceAccountId && accounts[block.sourceAccountId] ? block.sourceAccountId : defaultChecking?.id;
+
+          if (key === block.startMonth) {
+            if (accounts[block.debtAccountId]) p.accountBalances[block.debtAccountId] -= principal; // loan originated
+            if (sourceId) p.accountBalances[sourceId] -= downPayment;
+          }
+          if (key >= window[0] && key <= window[1]) {
+            if (sourceId) p.accountBalances[sourceId] -= payment;
+            if (accounts[block.debtAccountId]) {
+              const paidDown = Math.min(payment, -p.accountBalances[block.debtAccountId]); // don't overpay past zero
+              p.accountBalances[block.debtAccountId] += Math.max(0, paidDown);
             }
           }
         }
@@ -219,7 +269,7 @@ export class Simulator {
     };
   }
 
-  /** 25x the nominal annual continuous-expense run-rate active at month `m` (excludes debt paydowns). */
+  /** 25x the nominal annual continuous-expense run-rate active at month `m` (excludes debt/loan paydowns). */
   _fireNumberAt(m) {
     const date = monthIndex(this.startDate, m);
     let annualExpense = 0;
@@ -227,7 +277,7 @@ export class Simulator {
       if (b.category !== 'expense' || b.kind !== 'continuous') continue;
       if (b.debtAccountId) continue; // debt payments aren't "living expenses"
       if (!blockActiveInMonth(b, date)) continue;
-      annualExpense += b.amount;
+      annualExpense += nominalMonthlyAmount(b, date) * 12;
     }
     return annualExpense * 25;
   }
